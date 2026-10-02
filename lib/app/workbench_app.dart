@@ -1011,8 +1011,79 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     }
   }
 
+  Widget comparisonCard(List<ResearchRun> comparable) {
+    final task = store.taskRevision(
+      comparable.first.taskId,
+      comparable.first.taskRevision,
+    )!;
+    final metricKeys = <String>{
+      for (final run in comparable)
+        for (final key in (run.data['metrics'] as Map? ?? {}).keys)
+          key.toString(),
+    }.toList()..sort();
+    String metric(ResearchRun run, String key) {
+      final metrics = run.data['metrics'];
+      if (metrics is! Map || !metrics.containsKey(key)) return '—';
+      final value = metrics[key];
+      return value is Map || value is List ? jsonEncode(value) : '$value';
+    }
+
+    DataRow row(String label, String Function(ResearchRun) value) => DataRow(
+      cells: [
+        DataCell(Text(label)),
+        for (final run in comparable)
+          DataCell(
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 220),
+              child: Text(
+                value(run),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+      ],
+    );
+
+    return card(
+      '同任务结果比较 · ${task.title} · r${task.revision}',
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('不自动判断优劣或科学有效性'),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              columns: [
+                const DataColumn(label: Text('字段')),
+                for (final run in comparable)
+                  DataColumn(label: Text('运行 ${run.id.substring(0, 8)}')),
+              ],
+              rows: [
+                row('执行状态', (run) => run.status),
+                row('证据接纳', (run) => run.accepted ? '已接纳' : '待接纳'),
+                for (final key in metricKeys)
+                  row('指标 · $key', (run) => metric(run, key)),
+                row('结论', (run) => '${run.data['conclusion'] ?? '—'}'),
+                row(
+                  '产物数',
+                  (run) => '${(run.data['artifacts'] as List?)?.length ?? 0}',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget runPage() {
     final runs = store.runs(project!.id);
+    final grouped = <(String, int), List<ResearchRun>>{};
+    for (final run in runs) {
+      grouped.putIfAbsent((run.taskId, run.taskRevision), () => []).add(run);
+    }
     return layout([
       Align(
         alignment: Alignment.centerLeft,
@@ -1023,6 +1094,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         ),
       ),
       const Text('运行结果先保留原始记录。确认关联为证据表示纳入本项目分析，不代表科学结论已经验证。'),
+      for (final group in grouped.values.where((items) => items.length >= 2))
+        comparisonCard(group),
       ...runs.map(
         (run) => card(
           '运行 ${run.id}',
