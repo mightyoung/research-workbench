@@ -54,5 +54,7 @@ app.*.map.json
 *.db
 *.sqlite
 .env
+.env.*
+!.env.example
 *.pem
 *.key
