@@ -222,7 +222,7 @@ class ResearchExchange {
     return file.path;
   }
 
-  Future<void> _verifyManifest(Directory snapshot, String kind) async {
+  Future<Set<String>> _verifyManifest(Directory snapshot, String kind) async {
     final file = File(p.join(snapshot.path, 'manifest.json'));
     if (!await file.exists()) {
       throw const FormatException('Missing manifest.json');
@@ -233,6 +233,7 @@ class ResearchExchange {
         manifest['files'] is! List) {
       throw const FormatException('Unsupported package manifest');
     }
+    final listed = <String>{};
     for (final item in manifest['files'] as List) {
       if (item is! Map ||
           item['path'] is! String ||
@@ -240,7 +241,11 @@ class ResearchExchange {
           item['sha256'] is! String) {
         throw const FormatException('Invalid manifest file entry');
       }
-      final member = File(p.join(snapshot.path, _safe(item['path'] as String)));
+      final safe = _safe(item['path'] as String);
+      if (!listed.add(safe)) {
+        throw FormatException('Duplicate manifest path: $safe');
+      }
+      final member = File(p.join(snapshot.path, safe));
       if (!await member.exists() || await member.length() != item['bytes']) {
         throw FormatException(
           'Missing or changed package file: ${item['path']}',
@@ -251,6 +256,11 @@ class ResearchExchange {
         throw FormatException('Package checksum mismatch: ${item['path']}');
       }
     }
+    final required = kind == 'task' ? 'task.json' : 'result.json';
+    if (!listed.contains(required)) {
+      throw FormatException('Package manifest must verify $required');
+    }
+    return listed;
   }
 
   /// Import a task specification without running its command or opening its data.
@@ -458,9 +468,9 @@ class ResearchExchange {
   Future<ResearchRun> importResult(String jsonOrZipPath) async {
     final snapshot = await _snapshot(jsonOrZipPath, 'results');
     try {
-      if (jsonOrZipPath.toLowerCase().endsWith('.zip')) {
-        await _verifyManifest(snapshot, 'result');
-      }
+      final verifiedPaths = jsonOrZipPath.toLowerCase().endsWith('.zip')
+          ? await _verifyManifest(snapshot, 'result')
+          : <String>{};
       final files = await snapshot
           .list(recursive: true)
           .where((e) => e is File && p.basename(e.path) == 'result.json')
@@ -508,7 +518,11 @@ class ResearchExchange {
         if (path is! String) {
           throw const FormatException('Artifacts need relative paths');
         }
-        if (!await File(p.join(snapshot.path, _safe(path))).exists()) {
+        final safe = _safe(path);
+        if (verifiedPaths.isNotEmpty && !verifiedPaths.contains(safe)) {
+          throw FormatException('Unverified artifact: $path');
+        }
+        if (!await File(p.join(snapshot.path, safe)).exists()) {
           throw FormatException('Missing artifact: $path');
         }
       }

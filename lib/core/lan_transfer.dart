@@ -158,6 +158,7 @@ class LanTransferReceiver {
       final request = await client.getUrl(
         url.replace(path: '/transfer', query: '', fragment: ''),
       );
+      request.followRedirects = false;
       request.headers.set('x-research-pair-code', code.trim());
       final response = await request.close();
       if (response.statusCode == HttpStatus.forbidden) {
