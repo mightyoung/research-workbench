@@ -94,9 +94,13 @@ void main() {
       expect(find.text('8 个对象 · 5 条明确关联'), findsOneWidget);
       await tester.tap(find.text('Candidate one').first);
       await tester.pumpAndSettle();
+      expect(find.byKey(const Key('research-relation-graph')), findsOneWidget);
       expect(find.textContaining('absent · 修订 1'), findsOneWidget);
       expect(find.textContaining('出向 · 支持依据'), findsOneWidget);
-      await tester.tap(find.text('Precise claim').last);
+      final claimNode = find.byKey(const Key('relation-node-local-claim'));
+      await tester.ensureVisible(claimNode);
+      await tester.pumpAndSettle();
+      await tester.tap(claimNode);
       await tester.pumpAndSettle();
       expect(find.textContaining('出向 · 引用论文'), findsOneWidget);
       expect(find.textContaining('入向 · 写作引用'), findsOneWidget);

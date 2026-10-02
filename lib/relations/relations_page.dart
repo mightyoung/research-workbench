@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,6 +49,7 @@ class _RelationsPageState extends State<RelationsPage> {
     'task': '任务规格',
     'run': '执行结果',
     'outline': '写作提纲',
+    'note': '精读证据',
     'other': '其他记录',
   };
 
@@ -60,6 +62,25 @@ class _RelationsPageState extends State<RelationsPage> {
   void _load() {
     for (final entry in widget.store.entries(widget.projectId)) {
       _objects.add(_Object(entry.id, entry.kind, entry.title, entry.data));
+    }
+    for (final document in widget.store.documents(widget.projectId)) {
+      for (final note in widget.store.notes(document.id)) {
+        _objects.add(
+          _Object(
+            note.id,
+            'note',
+            note.quote.isEmpty ? note.text : note.quote,
+            {
+              'id': note.id,
+              'document': document.relativePath,
+              'page_number': note.pageNumber,
+              'locator': note.locator,
+              'quote': note.quote,
+              'text': note.text,
+            },
+          ),
+        );
+      }
     }
     // Include previous task revisions so old results remain bound to their
     // actual input rather than silently pointing at the newest task.
@@ -322,6 +343,93 @@ class _RelationsPageState extends State<RelationsPage> {
     );
   }
 
+  Widget _graph(_Object selected, ValueChanged<String> onNeighbor) {
+    final edges = _links
+        .where((edge) => edge.from == selected.key || edge.to == selected.key)
+        .take(8)
+        .toList();
+    final neighbors = <String>{
+      for (final edge in edges) edge.from == selected.key ? edge.to : edge.from,
+    }.toList();
+    final centers = <String, Offset>{selected.key: const Offset(360, 170)};
+    for (var i = 0; i < neighbors.length; i++) {
+      final angle = -math.pi / 2 + i * 2 * math.pi / neighbors.length;
+      centers[neighbors[i]] = Offset(
+        360 + 250 * math.cos(angle),
+        170 + 115 * math.sin(angle),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('关系图', style: Theme.of(context).textTheme.titleMedium),
+        const Text('箭头表示明确引用方向；点击节点查看来源。最多显示当前对象的 8 条关联。'),
+        const SizedBox(height: 8),
+        SizedBox(
+          key: const Key('research-relation-graph'),
+          height: 340,
+          child: InteractiveViewer(
+            constrained: false,
+            minScale: .5,
+            maxScale: 2.5,
+            child: SizedBox(
+              width: 720,
+              height: 340,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _RelationGraphPainter(
+                        centers,
+                        edges,
+                        Theme.of(context).colorScheme.outline,
+                      ),
+                    ),
+                  ),
+                  for (final position in centers.entries)
+                    Positioned(
+                      left: position.value.dx - 78,
+                      top: position.value.dy - 28,
+                      width: 156,
+                      height: 56,
+                      child: Material(
+                        color: position.key == selected.key
+                            ? Theme.of(context).colorScheme.primaryContainer
+                            : Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(10),
+                        child: InkWell(
+                          key: Key('relation-node-${position.key}'),
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: position.key == selected.key
+                              ? null
+                              : () => onNeighbor(position.key),
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: Center(
+                              child: Text(
+                                _objects
+                                    .firstWhere((o) => o.key == position.key)
+                                    .title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _detail(_Object object, {required ValueChanged<String> onNeighbor}) {
     final edges = _links
         .where((e) => e.from == object.key || e.to == object.key)
@@ -345,6 +453,8 @@ class _RelationsPageState extends State<RelationsPage> {
           SelectableText(
             '来源 ID：${object.sourceId}\n修订：${object.revision}\n本地对象 ID：${object.key}',
           ),
+          const SizedBox(height: 16),
+          _graph(object, onNeighbor),
           const SizedBox(height: 12),
           OutlinedButton.icon(
             icon: const Icon(Icons.copy),
@@ -415,4 +525,51 @@ class _RelationsPageState extends State<RelationsPage> {
       ),
     );
   }
+}
+
+class _RelationGraphPainter extends CustomPainter {
+  const _RelationGraphPainter(this.centers, this.edges, this.color);
+  final Map<String, Offset> centers;
+  final List<_Link> edges;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final stroke = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+    final fill = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    for (final edge in edges) {
+      final from = centers[edge.from];
+      final to = centers[edge.to];
+      if (from == null || to == null) continue;
+      canvas.drawLine(from, to, stroke);
+      final length = (to - from).distance;
+      if (length == 0) continue;
+      final direction = (to - from) / length;
+      final normal = Offset(-direction.dy, direction.dx);
+      final tip = from + (to - from) * .68;
+      final arrow = Path()
+        ..moveTo(tip.dx, tip.dy)
+        ..lineTo(
+          tip.dx - direction.dx * 12 + normal.dx * 6,
+          tip.dy - direction.dy * 12 + normal.dy * 6,
+        )
+        ..lineTo(
+          tip.dx - direction.dx * 12 - normal.dx * 6,
+          tip.dy - direction.dy * 12 - normal.dy * 6,
+        )
+        ..close();
+      canvas.drawPath(arrow, fill);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RelationGraphPainter oldDelegate) =>
+      oldDelegate.centers != centers ||
+      oldDelegate.edges != edges ||
+      oldDelegate.color != color;
 }

@@ -31,6 +31,8 @@ class ReaderPage extends StatefulWidget {
 class _ReaderPageState extends State<ReaderPage> {
   final _pdf = PdfViewerController();
   final _locator = TextEditingController();
+  final _pageNumber = TextEditingController();
+  final _quote = TextEditingController();
   final _note = TextEditingController();
   late final Future<String> _markdown;
   int _page = 1;
@@ -42,12 +44,15 @@ class _ReaderPageState extends State<ReaderPage> {
     super.initState();
     _markdown = widget.document.isPdf
         ? Future.value('')
-        : (widget.loadMarkdown?.call(widget.document.absolutePath) ?? File(widget.document.absolutePath).readAsString());
+        : (widget.loadMarkdown?.call(widget.document.absolutePath) ??
+              File(widget.document.absolutePath).readAsString());
   }
 
   @override
   void dispose() {
     _locator.dispose();
+    _pageNumber.dispose();
+    _quote.dispose();
     _note.dispose();
     super.dispose();
   }
@@ -171,12 +176,29 @@ class _ReaderPageState extends State<ReaderPage> {
   void _saveNote() {
     if (_note.text.trim().isEmpty) return;
     try {
+      final typedPage = _pageNumber.text.trim();
+      final pageNumber = typedPage.isEmpty
+          ? (widget.document.isPdf ? _page : null)
+          : int.tryParse(typedPage);
+      if (typedPage.isNotEmpty && pageNumber == null) {
+        throw const FormatException('页码须为正整数');
+      }
+      if (pageNumber != null &&
+          (pageNumber < 1 ||
+              (widget.document.isPdf &&
+                  _pageCount > 0 &&
+                  pageNumber > _pageCount))) {
+        throw const FormatException('页码超出文档范围');
+      }
       widget.store.saveNote(
         widget.document.id,
         _locator.text.trim(),
         _note.text.trim(),
+        pageNumber: pageNumber,
+        quote: _quote.text,
       );
       _note.clear();
+      _quote.clear();
       widget.onChanged?.call();
       setState(() {});
       ScaffoldMessenger.of(
@@ -186,6 +208,44 @@ class _ReaderPageState extends State<ReaderPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('保存失败：$error')));
+    }
+  }
+
+  Future<void> _linkNote(ReadingNote note) async {
+    var heading = '研究结果与讨论';
+    final linked = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('关联提纲段落'),
+        content: TextFormField(
+          initialValue: heading,
+          onChanged: (value) => heading = value,
+          decoration: const InputDecoration(labelText: '段落标题'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('关联'),
+          ),
+        ],
+      ),
+    );
+    if (linked == true && heading.trim().isNotEmpty) {
+      widget.store.addOutline(
+        widget.document.projectId,
+        heading.trim(),
+        note.id,
+      );
+      widget.onChanged?.call();
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('精读证据已关联提纲')));
+      }
     }
   }
 
@@ -252,6 +312,25 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         const SizedBox(height: 12),
         TextField(
+          controller: _pageNumber,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: '页码（可选）',
+            hintText: 'PDF 可点击“记录当前页”自动填写',
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _quote,
+          minLines: 2,
+          maxLines: 5,
+          decoration: const InputDecoration(
+            labelText: '原文引句（可选）',
+            hintText: '人工粘贴原文，便于复审核对',
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
           controller: _note,
           minLines: 3,
           maxLines: 7,
@@ -285,8 +364,17 @@ class _ReaderPageState extends State<ReaderPage> {
                         color: Theme.of(context).colorScheme.primary,
                       ),
                     ),
+                  if (note.pageNumber != null) Text('p. ${note.pageNumber}'),
+                  if (note.quote.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    SelectableText('“${note.quote}”'),
+                  ],
                   const SizedBox(height: 6),
                   SelectableText(note.text),
+                  TextButton(
+                    onPressed: () => _linkNote(note),
+                    child: const Text('关联论文提纲'),
+                  ),
                 ],
               ),
             ),
@@ -335,6 +423,7 @@ class _ReaderPageState extends State<ReaderPage> {
                     tooltip: '记录当前页',
                     onPressed: () {
                       _locator.text = 'p. $_page';
+                      _pageNumber.text = '$_page';
                       setState(() => _notesVisible = true);
                     },
                     icon: const Icon(Icons.note_add_outlined),
@@ -399,8 +488,10 @@ class _ReaderPageState extends State<ReaderPage> {
       title: Text(widget.document.title),
       actions: [
         IconButton(
-          tooltip: '来源与精读笔记',
-          icon: const Icon(Icons.notes_outlined),
+          tooltip: _notesVisible ? '返回阅读' : '来源与精读笔记',
+          icon: Icon(
+            _notesVisible ? Icons.menu_book_outlined : Icons.notes_outlined,
+          ),
           onPressed: () => setState(() => _notesVisible = !_notesVisible),
         ),
       ],
@@ -416,14 +507,9 @@ class _ReaderPageState extends State<ReaderPage> {
             ],
           );
         }
-        return Column(
-          children: [
-            Expanded(child: _reading()),
-            if (_notesVisible) ...[
-              const Divider(height: 1),
-              SizedBox(height: constraints.maxHeight * .48, child: _notes()),
-            ],
-          ],
+        return IndexedStack(
+          index: _notesVisible ? 1 : 0,
+          children: [_reading(), _notes()],
         );
       },
     ),

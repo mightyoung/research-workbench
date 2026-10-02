@@ -1,12 +1,15 @@
 # 验证记录（2026-10-02）
 
-## 本地功能修复（尚未推送）
+## 当前开发分支验证
 
-- 临时工作副本执行 `flutter analyze`：0 问题；`flutter test --reporter expanded`：18 项通过。新增跨设备任务 ZIP 导入、用户显式执行记录、带附件结果 ZIP 回传的真实文件测试；新增回环地址上的短期配对、仅共享用户选定文件的 LAN 测试；手机控件测试覆盖任务执行状态编辑与 LAN 入口未监听状态。
-- 导出界面改用 `file_picker` 的 `saveFile(bytes: ...)`，以支持 Android 系统文件保存 URI；这一原生对话框尚未在健康 Android 设备验收。
-- 先前的 Android APK 与下方原生截图属于旧开发版，**不包含本节功能改动**。本节不声称 Android、macOS 或 Windows 原生验收通过。
+源码验证基线：`feat/research-roundtrip` 的 `f641f81`（rebase 前为 `e888b17`）。下列原始日志均在本机被 Git 忽略的 `artifacts/final-2026-10-02/`，没有随仓库提交。
 
-## 已验证
+- `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy flutter test --reporter expanded --concurrency=1`：27 项通过，见 `test.log`。去掉代理变量只影响本次命令，避免 Flutter 测试进程的本地 WebSocket 被代理截获。
+- `flutter analyze`：无问题，见 `analyze.log`。
+- `flutter build apk --debug`：完成，见 `android-build.log`。本地 APK 为 `build/app/outputs/flutter-apk/app-debug.apk`，SHA-256 `d70499c58cbf8cb226a59d3823bcdb27e897854e7ac18a7f03d3a11043eb5fbd`，见 `apk.sha256`。这是调试包，不是发布包。
+- 测试覆盖任务包导入、人工执行记录、结果附件回传及校验、短期配对与单次 LAN 下载、页码引句到提纲/报告、显式关系图导航、同任务修订结果比较及手机/桌面控件。Android 原生文件选择器、PDF 渲染、LAN 实机传输仍需设备验收；源码测试和 APK 构建不等于这些原生交互已通过。
+
+## 早期基线验证
 
 - `flutter analyze`：目标仓库无问题，原始输出保存在本机忽略目录 `artifacts/analyze.log`。
 - `flutter test --reporter expanded`：目标仓库 13 项通过，原始输出保存在 `artifacts/test.log`。覆盖目录/ZIP 快照与路径拒绝、任务/结果身份绑定、关系引用解析，以及桌面和手机尺寸下的阅读、笔记、任务修订、结果人工接纳、关系入口和提纲操作。测试使用合成资料。
@@ -18,6 +21,6 @@
 - 本机只有 Xcode Command Line Tools，`xcodebuild -version` 提示需要完整 Xcode；未完成 macOS 原生构建。Windows 原生构建需要 Windows 开发机。本轮没有提交或发布任何安装包。
 - Android 构建/安装成功并不能证明原生文件选择器、PDF 渲染、导出目录写入已在设备端可用。这些仍需目标平台实机验收。
 - Markdown 阅读、PDF 阅读组件、定位文字笔记及证据关联到 Markdown 提纲均已在源码实现；widget 测试覆盖 Markdown/笔记和提纲关联，PDF 真机渲染未验收。笔记存放于 SQLite，不写进 PDF；导出的报告是附来源记录的 Markdown 草稿，不是完成排版、引用样式与投稿检查的论文。
-- 文件包可通过任何人工文件传输渠道送往异网设备；当前应用不提供 LAN 服务、云同步和远程自动执行。任务包中的代码/数据引用是描述字段，具体文件、版本、环境、许可证和实验可重复性由执行方核验。
+- 文件包可通过任何人工文件传输渠道送往异网设备；当前应用提供用户显式开启、短期配对、单文件的 LAN 传输；不提供后台同步、云同步或远程自动执行。任务包中的代码/数据引用是描述字段，具体文件、版本、环境、许可证和实验可重复性由执行方核验。
 - 结果导入先保留为未接纳运行；“接纳为证据”是用户操作，不对科学真实性作自动判断。原始 JSONL 字段及状态保留，缺失或多义的关系不自动推断。
 - 导入资料复制到应用私有目录。应用尚无用户级 ACL、加密库或协作权限模型；不要把这版当作多用户服务器。
