@@ -1,0 +1,182 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart';
+import 'package:uuid/uuid.dart';
+import 'models.dart';
+
+class WorkbenchStore {
+  WorkbenchStore._(this.rootPath, this.db);
+  final String rootPath;
+  final Database db;
+  static WorkbenchStore open(String rootPath) {
+    Directory(rootPath).createSync(recursive: true);
+    final db = sqlite3.open(p.join(rootPath, 'workbench.sqlite'));
+    db.execute('PRAGMA foreign_keys=ON');
+    db.execute(
+      '''CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,title TEXT,question TEXT,next_step TEXT);
+CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),relative_path TEXT,absolute_path TEXT);
+CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),kind TEXT,title TEXT,data TEXT);
+CREATE TABLE IF NOT EXISTS tasks(id TEXT,revision INTEGER,project_id TEXT REFERENCES projects(id),title TEXT,goal TEXT,spec TEXT,PRIMARY KEY(id,revision));
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT,task_revision INTEGER,status TEXT,accepted INTEGER,data TEXT,FOREIGN KEY(task_id,task_revision) REFERENCES tasks(id,revision));
+CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,document_id TEXT REFERENCES documents(id),locator TEXT,text TEXT);
+CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT,evidence_id TEXT);''',
+    );
+    return WorkbenchStore._(p.absolute(rootPath), db);
+  }
+
+  void close() => db.close();
+  List<ResearchProject> projects() => db
+      .select('SELECT * FROM projects ORDER BY rowid DESC')
+      .map(
+        (r) => ResearchProject(
+          id: r['id'],
+          title: r['title'],
+          question: r['question'],
+          nextStep: r['next_step'],
+        ),
+      )
+      .toList();
+  List<ResearchDocument> documents(String projectId) => db
+      .select(
+        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path',
+        [projectId],
+      )
+      .map(
+        (r) => ResearchDocument(
+          id: r['id'],
+          projectId: r['project_id'],
+          relativePath: r['relative_path'],
+          absolutePath: r['absolute_path'],
+        ),
+      )
+      .toList();
+  List<ResearchEntry> entries(String projectId, {String? kind}) => db
+      .select(
+        'SELECT * FROM entries WHERE project_id=?${kind == null ? '' : ' AND kind=?'}',
+        [projectId, ?kind],
+      )
+      .map(
+        (r) => ResearchEntry(
+          id: r['id'],
+          projectId: r['project_id'],
+          kind: r['kind'],
+          title: r['title'],
+          data: decode(r['data']),
+        ),
+      )
+      .toList();
+  List<ResearchTask> tasks(String projectId) => db
+      .select(
+        'SELECT t.* FROM tasks t WHERE project_id=? AND revision=(SELECT MAX(revision) FROM tasks WHERE id=t.id)',
+        [projectId],
+      )
+      .map(taskFromRow)
+      .toList();
+  ResearchTask taskFromRow(Row r) => ResearchTask(
+    id: r['id'],
+    projectId: r['project_id'],
+    title: r['title'],
+    goal: r['goal'],
+    revision: r['revision'],
+    spec: decode(r['spec']),
+  );
+  ResearchTask? taskRevision(String id, int revision) {
+    final rows = db.select('SELECT * FROM tasks WHERE id=? AND revision=?', [
+      id,
+      revision,
+    ]);
+    return rows.isEmpty ? null : taskFromRow(rows.first);
+  }
+
+  List<ResearchRun> runs(String projectId) => db
+      .select(
+        'SELECT r.* FROM runs r JOIN tasks t ON t.id=r.task_id AND t.revision=r.task_revision WHERE t.project_id=?',
+        [projectId],
+      )
+      .map(runFromRow)
+      .toList();
+  ResearchRun runFromRow(Row r) => ResearchRun(
+    id: r['id'],
+    taskId: r['task_id'],
+    status: r['status'],
+    taskRevision: r['task_revision'],
+    accepted: r['accepted'] == 1,
+    data: decode(r['data']),
+  );
+  List<ReadingNote> notes(String documentId) => db
+      .select('SELECT * FROM notes WHERE document_id=?', [documentId])
+      .map(
+        (r) => ReadingNote(
+          id: r['id'],
+          documentId: r['document_id'],
+          locator: r['locator'],
+          text: r['text'],
+        ),
+      )
+      .toList();
+  void saveProject(
+    String id, {
+    required String question,
+    required String nextStep,
+  }) => db.execute('UPDATE projects SET question=?,next_step=? WHERE id=?', [
+    question,
+    nextStep,
+    id,
+  ]);
+  void saveNote(String documentId, String locator, String text) => db.execute(
+    'INSERT INTO notes VALUES(?,?,?,?)',
+    [const Uuid().v4(), documentId, locator, text],
+  );
+  ResearchTask saveTask({
+    String? id,
+    required String projectId,
+    required String title,
+    required String goal,
+    required Map<String, dynamic> spec,
+  }) {
+    id ??= const Uuid().v4();
+    final existing = db.select(
+      'SELECT project_id,MAX(revision) AS revision FROM tasks WHERE id=?',
+      [id],
+    ).first;
+    if (existing['revision'] != null && existing['project_id'] != projectId) {
+      throw StateError('Task belongs to a different project');
+    }
+    final revision = ((existing['revision'] as int?) ?? 0) + 1;
+    db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)', [
+      id,
+      revision,
+      projectId,
+      title,
+      goal,
+      jsonEncode(spec),
+    ]);
+    return ResearchTask(
+      id: id,
+      projectId: projectId,
+      title: title,
+      goal: goal,
+      revision: revision,
+      spec: decode(jsonEncode(spec)),
+    );
+  }
+
+  void acceptRun(String runId) =>
+      db.execute('UPDATE runs SET accepted=1 WHERE id=?', [runId]);
+  void addOutline(String projectId, String heading, String evidenceId) =>
+      db.execute('INSERT INTO outline VALUES(?,?,?,?)', [
+        const Uuid().v4(),
+        projectId,
+        heading,
+        evidenceId,
+      ]);
+  List<Map<String, dynamic>> outline(String projectId) => db
+      .select('SELECT * FROM outline WHERE project_id=? ORDER BY rowid', [
+        projectId,
+      ])
+      .map((r) => Map<String, dynamic>.from(r))
+      .toList();
+  static Map<String, dynamic> decode(String value) =>
+      Map<String, dynamic>.from(jsonDecode(value) as Map);
+}

@@ -1,0 +1,287 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:research_workbench/app/workbench_app.dart';
+import 'package:research_workbench/core/exchange.dart';
+import 'package:research_workbench/core/store.dart';
+
+Finder field(String label) => find.byWidgetPredicate(
+  (widget) => widget is TextField && widget.decoration?.labelText == label,
+);
+
+Future<void> settle(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 350));
+}
+
+void main() {
+  late Directory temp;
+  late WorkbenchStore store;
+  late String projectId;
+  setUp(() async {
+    temp = Directory.systemTemp.createTempSync('workbench-ui-');
+    store = WorkbenchStore.open(p.join(temp.path, 'app'));
+    final source = Directory(p.join(temp.path, 'fixture'))..createSync();
+    File(p.join(source.path, 'README.md')).writeAsStringSync(
+      '# Reading fixture\n\nEvidence must remain conditional.\n',
+    );
+    File(p.join(source.path, 'papers.jsonl')).writeAsStringSync(
+      '${jsonEncode({'id': 'paper-1', 'title': 'Fixture paper', 'year': 2026, 'status': 'needs_review', 'doi': '10.example/paper'})}\n',
+    );
+    File(p.join(source.path, 'claims.jsonl')).writeAsStringSync(
+      '${jsonEncode({
+        'id': 'claim-1',
+        'title': 'Conditional evidence',
+        'statement': 'Needs replication',
+        'status': 'needs_review',
+        'rev': 2,
+        'locator': {'path': 'README.md', 'section': 'Reading fixture'},
+      })}\n',
+    );
+    projectId = (await ResearchExchange(store).importResearch(source.path)).id;
+  });
+  tearDown(() {
+    store.close();
+    temp.deleteSync(recursive: true);
+  });
+
+  for (final size in [const Size(1280, 900), const Size(390, 844)]) {
+    final wide = size.width > 720;
+    testWidgets('library, metadata, reading and notes at $size', (
+      tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        WorkbenchApp(
+          store: store,
+          loadMarkdown: (path) => Future.value(File(path).readAsStringSync()),
+        ),
+      );
+      await settle(tester);
+      expect(find.text('当前研究'), findsOneWidget);
+      await tester.tap(
+        wide ? find.text('文库与证据') : find.byType(NavigationDestination).at(1),
+      );
+      await settle(tester);
+      await tester.tap(find.text('Fixture paper'));
+      await settle(tester);
+      expect(find.textContaining('needs_review'), findsWidgets);
+      expect(find.textContaining('10.example/paper'), findsWidgets);
+      expect(
+        store.entries(projectId, kind: 'papers').single.data['status'],
+        'needs_review',
+      );
+      await tester.tap(find.text('关闭'));
+      await settle(tester);
+      await tester.tap(find.text('文件'));
+      await settle(tester);
+      await tester.tap(find.text('README.md').first);
+      await tester.runAsync(
+        () async => Future<void>.delayed(const Duration(milliseconds: 80)),
+      );
+      await settle(tester);
+      expect(
+        tester.widget<Markdown>(find.byType(Markdown)).data,
+        contains('Evidence must remain conditional.'),
+      );
+      if (!wide) {
+        await tester.tap(find.byTooltip('来源与精读笔记'));
+        await settle(tester);
+      }
+      await tester.ensureVisible(field('证据定位'));
+      await tester.enterText(field('证据定位'), 'section 1');
+      await tester.ensureVisible(field('精读笔记 / 批注'));
+      await tester.enterText(
+        field('精读笔记 / 批注'),
+        'Check independent replication',
+      );
+      await tester.ensureVisible(find.text('保存笔记'));
+      await tester.tap(find.text('保存笔记'));
+      await settle(tester);
+      expect(
+        store.notes(store.documents(projectId).single.id).single.text,
+        'Check independent replication',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('task drafts save immutable revisions at $size', (
+      tester,
+    ) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        WorkbenchApp(
+          store: store,
+          loadMarkdown: (path) => Future.value(File(path).readAsStringSync()),
+        ),
+      );
+      await settle(tester);
+      await tester.tap(
+        wide ? find.text('研究任务') : find.byType(NavigationDestination).at(2),
+      );
+      await settle(tester);
+      await tester.tap(find.text('创建研究 / 实验任务'));
+      await settle(tester);
+      await tester.enterText(field('任务名称'), 'Compare shared input');
+      await tester.enterText(field('问题与预期结论范围'), 'Estimate only this fixture');
+      await tester.enterText(
+        field('参数、数据、代码、环境与预期产物（JSON）'),
+        '{"parameters":{"seed":7},"codeReference":"commit:abc"}',
+      );
+      await tester.tap(find.text('保存规格'));
+      await settle(tester);
+      final first = store.tasks(projectId).single;
+      expect(first.revision, 1);
+      expect(first.spec['parameters'], {'seed': 7});
+      await tester.tap(find.text('编辑并保存新修订'));
+      await settle(tester);
+      await tester.enterText(field('问题与预期结论范围'), 'Revised scope');
+      await tester.tap(find.text('保存规格'));
+      await settle(tester);
+      expect(store.tasks(projectId).single.revision, 2);
+      expect(
+        store.taskRevision(first.id, 1)!.goal,
+        'Estimate only this fixture',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('returned run requires explicit evidence acceptance at $size', (
+      tester,
+    ) async {
+      final task = store.saveTask(
+        projectId: projectId,
+        title: 'Fixture run',
+        goal: 'Test evidence workflow',
+        spec: {
+          'parameters': {'seed': 9},
+        },
+      );
+      final result = File(p.join(temp.path, 'result.json'))
+        ..writeAsStringSync(
+          jsonEncode({
+            'runId': 'fixture-run',
+            'taskId': task.id,
+            'taskRevision': task.revision,
+            'status': 'completed',
+            'metrics': {'score': 0.72},
+            'logs': [],
+            'artifacts': [],
+          }),
+        );
+      await tester.runAsync(
+        () => ResearchExchange(store).importResult(result.path),
+      );
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        WorkbenchApp(
+          store: store,
+          loadMarkdown: (path) => Future.value(File(path).readAsStringSync()),
+        ),
+      );
+      await settle(tester);
+      await tester.tap(
+        wide ? find.text('运行结果') : find.byType(NavigationDestination).at(3),
+      );
+      await settle(tester);
+      expect(store.runs(projectId).single.accepted, false);
+      if (!wide) {
+        await tester.drag(find.byType(ListView).last, const Offset(0, -340));
+        await settle(tester);
+      }
+      await tester.ensureVisible(find.text('确认关联为证据'));
+      await tester.tap(find.text('确认关联为证据'));
+      await settle(tester);
+      expect(find.text('关联为研究证据'), findsOneWidget);
+      expect(store.runs(projectId).single.accepted, false);
+      await tester.tap(find.text('确认'));
+      await settle(tester);
+      expect(store.runs(projectId).single.accepted, true);
+      expect(find.textContaining('已关联证据'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('research relation entry opens at $size', (tester) async {
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(WorkbenchApp(store: store));
+      await settle(tester);
+      await tester.tap(
+        find.widgetWithIcon(OutlinedButton, Icons.device_hub_outlined).first,
+      );
+      await settle(tester);
+      expect(find.text('搜索标题或来源 ID'), findsOneWidget);
+      expect(find.textContaining('个对象'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('claim evidence links to a report outline through dialogs', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      WorkbenchApp(
+        store: store,
+        loadMarkdown: (path) => Future.value(File(path).readAsStringSync()),
+      ),
+    );
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    await tester.tap(find.text('Conditional evidence'));
+    await settle(tester);
+    await tester.tap(find.text('关联论文提纲'));
+    await settle(tester);
+    await tester.enterText(field('段落标题'), 'Limitations and replication');
+    await tester.tap(find.text('关联'));
+    await settle(tester);
+    await tester.tap(find.text('论文写作'));
+    await settle(tester);
+    expect(find.text('Limitations and replication'), findsOneWidget);
+    expect(
+      store.outline(projectId).single['evidence_id'],
+      store.entries(projectId, kind: 'claims').single.id,
+    );
+    expect(
+      store.entries(projectId, kind: 'claims').single.data['status'],
+      'needs_review',
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
