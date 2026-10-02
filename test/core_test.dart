@@ -255,4 +255,35 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       expect(store.runs(project.id).single.accepted, true);
     },
   );
+  test('result ZIP cannot leave result.json outside its hash manifest', () async {
+    store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
+      'p', 'Project', '', '',
+    ]);
+    final task = store.saveTask(
+      projectId: 'p',
+      title: 'Task',
+      goal: 'Measure',
+      spec: {},
+    );
+    final result = utf8.encode(jsonEncode({
+      'format': 'research-result-v1',
+      'runId': 'r-1',
+      'taskId': task.id,
+      'taskRevision': task.revision,
+      'status': 'completed',
+    }));
+    final manifest = utf8.encode(jsonEncode({
+      'format': 'research-package-v1',
+      'kind': 'result',
+      'files': [],
+    }));
+    final archive = Archive()
+      ..addFile(ArchiveFile('result.json', result.length, result))
+      ..addFile(ArchiveFile('manifest.json', manifest.length, manifest));
+    final zip = File(p.join(temp.path, 'unverified-result.zip'))
+      ..writeAsBytesSync(ZipEncoder().encode(archive));
+    await expectLater(exchange.importResult(zip.path), throwsFormatException);
+    expect(store.runs('p'), isEmpty);
+  });
+
 }
