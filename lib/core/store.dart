@@ -9,11 +9,11 @@ class WorkbenchStore {
   WorkbenchStore._(this.rootPath, this.db);
   final String rootPath;
   final Database db;
-  static WorkbenchStore open(String rootPath) {
-    Directory(rootPath).createSync(recursive: true);
-    final db = sqlite3.open(p.join(rootPath, 'workbench.sqlite'));
-    db.execute('PRAGMA foreign_keys=ON');
-    db.execute(
+
+  /// Ordered schema migrations; entry i upgrades `user_version` i to i+1.
+  /// Append new steps only — never edit a shipped one.
+  static final List<void Function(Database)> _migrations = [
+    (db) => db.execute(
       '''CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,title TEXT,question TEXT,next_step TEXT);
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),relative_path TEXT,absolute_path TEXT);
 CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),kind TEXT,title TEXT,data TEXT);
@@ -21,9 +21,84 @@ CREATE TABLE IF NOT EXISTS tasks(id TEXT,revision INTEGER,project_id TEXT REFERE
 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT,task_revision INTEGER,status TEXT,accepted INTEGER,data TEXT,FOREIGN KEY(task_id,task_revision) REFERENCES tasks(id,revision));
 CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,document_id TEXT REFERENCES documents(id),locator TEXT,text TEXT);
 CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT,evidence_id TEXT);''',
-    );
+    ),
+    _relativeSnapshotPaths,
+  ];
+  static int get schemaVersion => _migrations.length;
+
+  static WorkbenchStore open(String rootPath) {
+    Directory(rootPath).createSync(recursive: true);
+    final db = sqlite3.open(p.join(rootPath, 'workbench.sqlite'));
+    try {
+      db.execute('PRAGMA foreign_keys=ON');
+      _migrate(db);
+    } catch (_) {
+      db.close();
+      rethrow;
+    }
     return WorkbenchStore._(p.absolute(rootPath), db);
   }
+
+  static void _migrate(Database db) {
+    final version = db.select('PRAGMA user_version').first.columnAt(0) as int;
+    if (version > schemaVersion) {
+      throw StateError(
+        'Database schema v$version is newer than this app (v$schemaVersion)',
+      );
+    }
+    for (var v = version; v < schemaVersion; v++) {
+      db.execute('BEGIN');
+      try {
+        _migrations[v](db);
+        db.execute('PRAGMA user_version=${v + 1}');
+        db.execute('COMMIT');
+      } catch (_) {
+        db.execute('ROLLBACK');
+        rethrow;
+      }
+    }
+  }
+
+  /// v2: snapshot paths become relative to [rootPath] so the data directory
+  /// can move. Legacy absolute paths keep their `snapshots/<group>/<uuid>`
+  /// tail, which is all that is needed to resolve them under a new root.
+  static void _relativeSnapshotPaths(Database db) {
+    String snapshotKey(String dir) {
+      final parts = p.split(dir);
+      return p.posix.joinAll(parts.sublist(parts.length - 3));
+    }
+
+    db.execute(
+      'ALTER TABLE documents RENAME COLUMN absolute_path TO snapshot_path',
+    );
+    for (final r in db.select(
+      'SELECT id,relative_path,snapshot_path FROM documents',
+    )) {
+      final full = r['snapshot_path'] as String;
+      final relative = r['relative_path'] as String;
+      if (!p.isAbsolute(full) || !full.endsWith(relative)) continue;
+      final dir = full.substring(0, full.length - relative.length);
+      db.execute('UPDATE documents SET snapshot_path=? WHERE id=?', [
+        p.posix.join(snapshotKey(dir), relative.replaceAll('\\', '/')),
+        r['id'],
+      ]);
+    }
+    for (final r in db.select('SELECT id,data FROM runs')) {
+      final data = decode(r['data']);
+      final path = data['_snapshotPath'];
+      if (path is! String || !p.isAbsolute(path)) continue;
+      data['_snapshotPath'] = snapshotKey(path);
+      db.execute('UPDATE runs SET data=? WHERE id=?', [
+        jsonEncode(data),
+        r['id'],
+      ]);
+    }
+  }
+
+  /// Converts a path inside [rootPath] to the portable form stored in the DB.
+  String storedPath(String absolute) =>
+      p.posix.joinAll(p.split(p.relative(absolute, from: rootPath)));
+  String resolvePath(String stored) => p.normalize(p.join(rootPath, stored));
 
   void close() => db.close();
   List<ResearchProject> projects() => db
@@ -47,7 +122,7 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           id: r['id'],
           projectId: r['project_id'],
           relativePath: r['relative_path'],
-          absolutePath: r['absolute_path'],
+          absolutePath: resolvePath(r['snapshot_path']),
         ),
       )
       .toList();
