@@ -75,4 +75,46 @@ void main() {
       expect(targetReached, false);
     },
   );
+  test('a paired LAN share accepts only one concurrent download', () async {
+    final temp = Directory.systemTemp.createTempSync('lan-one-shot-');
+    addTearDown(() => temp.deleteSync(recursive: true));
+    final source = File(p.join(temp.path, 'large.zip'));
+    final writer = source.openSync(mode: FileMode.write);
+    final chunk = List<int>.filled(1024 * 1024, 7);
+    for (var i = 0; i < 32; i++) {
+      writer.writeFromSync(chunk);
+    }
+    writer.closeSync();
+    final session = await LanShareSession.start(
+      file: source,
+      stagingDirectory: Directory(p.join(temp.path, 'staging')),
+      bindAddress: InternetAddress.loopbackIPv4,
+      lifetime: const Duration(seconds: 15),
+    );
+    addTearDown(session.stop);
+    final firstClient = HttpClient();
+    final secondClient = HttpClient();
+    addTearDown(() {
+      firstClient.close(force: true);
+      secondClient.close(force: true);
+    });
+    Future<HttpClientResponse> request(HttpClient client) async {
+      final req = await client.getUrl(
+        Uri.parse('http://127.0.0.1:${session.port}/transfer'),
+      );
+      req.headers.set('x-research-pair-code', session.code);
+      return req.close();
+    }
+
+    final first = await request(firstClient);
+    expect(first.statusCode, HttpStatus.ok);
+    var secondSucceeded = false;
+    try {
+      secondSucceeded =
+          (await request(secondClient)).statusCode == HttpStatus.ok;
+    } on SocketException {
+      // Closing the one-shot listener also refuses later attempts.
+    }
+    expect(secondSucceeded, false);
+  });
 }

@@ -76,7 +76,7 @@ class _LanTransferPageState extends State<LanTransferPage> {
       builder: (context) => AlertDialog(
         title: const Text('开始局域网共享'),
         content: Text(
-          '只共享这一个文件：${p.basename(file)}。同一网络设备需要地址和配对码；10 分钟或成功下载一次后停止。',
+          '只共享这一个文件：${p.basename(file)}。同一网络设备需要地址和配对码；10 分钟或首次配对下载请求后停止。',
         ),
         actions: [
           TextButton(
@@ -211,7 +211,7 @@ class _LanTransferPageState extends State<LanTransferPage> {
                   const SizedBox(height: 10),
                   if (session?.isActive != true) const Text('未开启共享'),
                   if (session?.isActive == true) ...[
-                    const Text('仅限一次下载；10 分钟后自动停止。'),
+                    const Text('仅限一次配对下载请求；10 分钟后自动停止。'),
                     if (_addresses.isEmpty)
                       const Text('未找到局域网 IPv4 地址，请检查 Wi‑Fi/局域网。'),
                     for (final address in _addresses)

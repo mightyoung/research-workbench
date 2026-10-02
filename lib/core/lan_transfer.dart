@@ -24,6 +24,7 @@ class LanShareSession {
   Timer? _expiry;
   StreamSubscription<HttpRequest>? _requests;
   bool _active = true;
+  bool _claimed = false;
   bool get isActive => _active;
   int get port => _server.port;
   String get fileName => p.basename(_file.path);
@@ -77,6 +78,7 @@ class LanShareSession {
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
     if (!_active ||
+        _claimed ||
         request.method != 'GET' ||
         request.uri.path != '/transfer') {
       response.statusCode = HttpStatus.notFound;
@@ -88,6 +90,7 @@ class LanShareSession {
       await response.close();
       return;
     }
+    _claimed = true;
     try {
       response.headers.contentType = ContentType.binary;
       response.headers.set('x-file-name', Uri.encodeComponent(fileName));
