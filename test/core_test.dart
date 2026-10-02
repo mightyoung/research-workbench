@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:research_workbench/core/exchange.dart';
 import 'package:research_workbench/core/store.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 void main() {
   late Directory temp;
@@ -129,5 +130,68 @@ void main() {
         }),
       );
     await expectLater(exchange.importResult(input.path), throwsFormatException);
+  });
+
+  test('legacy absolute paths migrate and survive a moved data directory', () {
+    final oldRoot = p.join(temp.path, 'old');
+    Directory(oldRoot).createSync();
+    final legacy = sqlite3.open(p.join(oldRoot, 'workbench.sqlite'));
+    legacy.execute(
+      '''CREATE TABLE projects(id TEXT PRIMARY KEY,title TEXT,question TEXT,next_step TEXT);
+CREATE TABLE documents(id TEXT PRIMARY KEY,project_id TEXT,relative_path TEXT,absolute_path TEXT);
+CREATE TABLE tasks(id TEXT,revision INTEGER,project_id TEXT,title TEXT,goal TEXT,spec TEXT,PRIMARY KEY(id,revision));
+CREATE TABLE runs(id TEXT PRIMARY KEY,task_id TEXT,task_revision INTEGER,status TEXT,accepted INTEGER,data TEXT);
+INSERT INTO projects VALUES('p1','P','','');
+INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
+    );
+    legacy.execute('INSERT INTO documents VALUES(?,?,?,?)', [
+      'd1',
+      'p1',
+      'notes/a.md',
+      p.join(oldRoot, 'snapshots', 'research', 'snap-1', 'notes', 'a.md'),
+    ]);
+    legacy.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', [
+      'r1',
+      't1',
+      1,
+      'completed',
+      0,
+      jsonEncode({
+        '_snapshotPath': p.join(oldRoot, 'snapshots', 'results', 'res-1'),
+      }),
+    ]);
+    legacy.close();
+
+    final newRoot = p.join(temp.path, 'moved');
+    Directory(oldRoot).renameSync(newRoot);
+    final moved = WorkbenchStore.open(newRoot);
+    addTearDown(moved.close);
+    expect(
+      moved.db.select('PRAGMA user_version').first.columnAt(0),
+      WorkbenchStore.schemaVersion,
+    );
+    expect(
+      moved.documents('p1').single.absolutePath,
+      p.join(
+        moved.rootPath,
+        'snapshots',
+        'research',
+        'snap-1',
+        'notes',
+        'a.md',
+      ),
+    );
+    expect(
+      moved.runs('p1').single.data['_snapshotPath'],
+      'snapshots/results/res-1',
+    );
+  });
+
+  test('a database from a newer app version is refused', () {
+    final root = p.join(temp.path, 'future');
+    WorkbenchStore.open(root)
+      ..db.execute('PRAGMA user_version=999')
+      ..close();
+    expect(() => WorkbenchStore.open(root), throwsStateError);
   });
 }

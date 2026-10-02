@@ -149,7 +149,7 @@ class ResearchExchange {
             const Uuid().v4(),
             id,
             relative,
-            entity.path,
+            store.storedPath(entity.path),
           ]);
         }
         if (ext == '.jsonl') {
@@ -344,7 +344,7 @@ class ResearchExchange {
         await snapshot.delete(recursive: true);
         return store.runFromRow(previous.first);
       }
-      data['_snapshotPath'] = snapshot.path;
+      data['_snapshotPath'] = store.storedPath(snapshot.path);
       store.db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', [
         id,
         taskId,
