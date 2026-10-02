@@ -575,6 +575,10 @@ class ResearchExchange {
       for (final run in store.runs(projectId).where((r) => r.accepted))
         run.id: run,
     };
+    final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
+      for (final doc in store.documents(projectId))
+        for (final note in store.notes(doc.id)) note.id: (doc, note),
+    };
     final out = StringBuffer(
       '# ${project.title}\n\n${project.question}\n\n下一步：${project.nextStep}\n\n',
     );
@@ -591,6 +595,15 @@ class ResearchExchange {
         out.writeln(
           '执行记录：${run.id}，任务 ${run.taskId} r${run.taskRevision}，状态 ${run.status}\n\n指标：${jsonEncode(run.data['metrics'] ?? {})}\n\n产物：${jsonEncode(run.data['artifacts'] ?? [])}\n\n人工关联为证据；此状态不代表科学结论已验证。\n',
         );
+      } else if (noteEvidence.containsKey(evidence)) {
+        final (doc, note) = noteEvidence[evidence]!;
+        out.writeln(
+          '精读证据：${note.id}\n\n来源：${doc.relativePath}'
+          '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
+          '${note.locator.isEmpty ? '' : ' · ${note.locator}'}\n\n'
+          '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
+          '${note.text}\n',
+        );
       } else {
         out.writeln('待复审或未接纳的证据：$evidence\n');
       }
@@ -599,7 +612,10 @@ class ResearchExchange {
     for (final doc in store.documents(projectId)) {
       for (final note in store.notes(doc.id)) {
         out.writeln(
-          '### ${doc.relativePath} · ${note.locator}\n\n${note.text}\n',
+          '### ${doc.relativePath} · ${note.locator}'
+          '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}\n\n'
+          '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
+          '${note.text}\n',
         );
       }
     }

@@ -67,6 +67,10 @@ class ReadingNote {
     required this.documentId,
     required this.locator,
     required this.text,
+    this.pageNumber,
+    this.quote = '',
   });
   final String id, documentId, locator, text;
+  final int? pageNumber;
+  final String quote;
 }

@@ -298,4 +298,51 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       expect(store.runs('p'), isEmpty);
     },
   );
+  test('page quote note traces through an outline into the report', () async {
+    final source = Directory(p.join(temp.path, 'reading'))..createSync();
+    File(p.join(source.path, 'paper.md')).writeAsStringSync('# Study');
+    final project = await exchange.importResearch(source.path);
+    final doc = store.documents(project.id).single;
+    (store as dynamic).saveNote(
+      doc.id,
+      'Methods',
+      'Check the stated cohort size',
+      pageNumber: 5,
+      quote: 'The final cohort included 42 participants.',
+    );
+    final note = store.notes(doc.id).single as dynamic;
+    expect(note.pageNumber, 5);
+    expect(note.quote, 'The final cohort included 42 participants.');
+    store.addOutline(project.id, 'Methods evidence', note.id as String);
+    final report = File(
+      await exchange.exportReport(project.id, temp.path),
+    ).readAsStringSync();
+    expect(report, contains('paper.md'));
+    expect(report, contains('p. 5'));
+    expect(report, contains('The final cohort included 42 participants.'));
+    expect(report, contains(note.id as String));
+  });
+
+  test('existing v3 reading notes gain empty page and quote fields', () {
+    final root = p.join(temp.path, 'v3-notes');
+    Directory(root).createSync();
+    final legacy = sqlite3.open(p.join(root, 'workbench.sqlite'));
+    legacy.execute('''
+CREATE TABLE projects(id TEXT PRIMARY KEY,title TEXT,question TEXT,next_step TEXT);
+CREATE TABLE documents(id TEXT PRIMARY KEY,project_id TEXT,relative_path TEXT,snapshot_path TEXT);
+CREATE TABLE notes(id TEXT PRIMARY KEY,document_id TEXT,locator TEXT,text TEXT);
+INSERT INTO projects VALUES('p','Project','','');
+INSERT INTO documents VALUES('d','p','paper.md','paper.md');
+INSERT INTO notes VALUES('n','d','Section 2','Legacy note');
+PRAGMA user_version=3;
+''');
+    legacy.close();
+    final migrated = WorkbenchStore.open(root);
+    addTearDown(migrated.close);
+    final note = migrated.notes('d').single;
+    expect(note.text, 'Legacy note');
+    expect(note.pageNumber, isNull);
+    expect(note.quote, isEmpty);
+    expect(WorkbenchStore.schemaVersion, 4);
+  });
 }

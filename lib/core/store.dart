@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     (db) => db.execute(
       'CREATE TABLE IF NOT EXISTS task_imports(task_id TEXT,revision INTEGER,package_path TEXT,package_sha256 TEXT,PRIMARY KEY(task_id,revision),FOREIGN KEY(task_id,revision) REFERENCES tasks(id,revision))',
     ),
+    (db) => db.execute(
+      "ALTER TABLE notes ADD COLUMN page_number INTEGER; ALTER TABLE notes ADD COLUMN quoted_text TEXT NOT NULL DEFAULT '';",
+    ),
   ];
   static int get schemaVersion => _migrations.length;
 
@@ -190,6 +193,8 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           documentId: r['document_id'],
           locator: r['locator'],
           text: r['text'],
+          pageNumber: r['page_number'],
+          quote: r['quoted_text'],
         ),
       )
       .toList();
@@ -202,10 +207,22 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     nextStep,
     id,
   ]);
-  void saveNote(String documentId, String locator, String text) => db.execute(
-    'INSERT INTO notes VALUES(?,?,?,?)',
-    [const Uuid().v4(), documentId, locator, text],
-  );
+  void saveNote(
+    String documentId,
+    String locator,
+    String text, {
+    int? pageNumber,
+    String quote = '',
+  }) {
+    if (pageNumber != null && pageNumber < 1) {
+      throw const FormatException('Page number must be positive');
+    }
+    db.execute(
+      'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text) VALUES(?,?,?,?,?,?)',
+      [const Uuid().v4(), documentId, locator, text, pageNumber, quote.trim()],
+    );
+  }
+
   ResearchTask saveTask({
     String? id,
     required String projectId,

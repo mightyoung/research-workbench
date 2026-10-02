@@ -1240,6 +1240,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     final p = project!;
     final outline = store.outline(p.id);
     final entries = store.entries(p.id);
+    final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
+      for (final doc in store.documents(p.id))
+        for (final note in store.notes(doc.id)) note.id: (doc, note),
+    };
     return layout([
       card(
         '证据驱动的论文提纲',
@@ -1273,17 +1277,31 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       ...outline.map((row) {
         final id = '${row['evidence_id'] ?? row['evidenceId'] ?? ''}';
         final e = entries.where((e) => e.id == id).firstOrNull;
+        final note = noteEvidence[id];
         return card(
           '${row['heading']}',
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(e?.title ?? '运行结果 / 产物'),
+              Text(
+                e?.title ??
+                    (note == null
+                        ? '运行结果 / 产物'
+                        : '精读证据 · ${note.$1.relativePath}'
+                              '${note.$2.pageNumber == null ? '' : ' · p. ${note.$2.pageNumber}'}'),
+              ),
               SelectableText(id),
+              if (note != null && note.$2.quote.isNotEmpty)
+                SelectableText('“${note.$2.quote}”'),
               if (e != null)
                 TextButton(
                   onPressed: () => showEntry(e),
                   child: const Text('查看证据'),
+                ),
+              if (note != null)
+                TextButton(
+                  onPressed: () => openDocument(note.$1),
+                  child: const Text('打开精读来源'),
                 ),
               IconButton(
                 tooltip: '复制证据 ID',
