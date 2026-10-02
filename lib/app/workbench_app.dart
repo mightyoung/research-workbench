@@ -1,19 +1,31 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:path/path.dart' as p;
 import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
+import 'lan_transfer_page.dart';
 import 'theme.dart';
 
 class WorkbenchApp extends StatelessWidget {
-  const WorkbenchApp({super.key, required this.store, this.loadMarkdown});
+  const WorkbenchApp({
+    super.key,
+    required this.store,
+    this.loadMarkdown,
+    this.pickImportFile,
+    this.saveExportFile,
+  });
   final WorkbenchStore store;
   final Future<String> Function(String path)? loadMarkdown;
+  final Future<String?> Function(List<String> extensions)? pickImportFile;
+  final Future<Uri?> Function(String name, Uint8List bytes, String mimeType)?
+  saveExportFile;
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: '研究工作台',
@@ -24,14 +36,28 @@ class WorkbenchApp extends StatelessWidget {
     locale: const Locale('zh'),
     supportedLocales: const [Locale('zh'), Locale('en')],
     localizationsDelegates: GlobalMaterialLocalizations.delegates,
-    home: WorkbenchHome(store: store, loadMarkdown: loadMarkdown),
+    home: WorkbenchHome(
+      store: store,
+      loadMarkdown: loadMarkdown,
+      pickImportFile: pickImportFile,
+      saveExportFile: saveExportFile,
+    ),
   );
 }
 
 class WorkbenchHome extends StatefulWidget {
-  const WorkbenchHome({super.key, required this.store, this.loadMarkdown});
+  const WorkbenchHome({
+    super.key,
+    required this.store,
+    this.loadMarkdown,
+    this.pickImportFile,
+    this.saveExportFile,
+  });
   final WorkbenchStore store;
   final Future<String> Function(String path)? loadMarkdown;
+  final Future<String?> Function(List<String> extensions)? pickImportFile;
+  final Future<Uri?> Function(String name, Uint8List bytes, String mimeType)?
+  saveExportFile;
   @override
   State<WorkbenchHome> createState() => _WorkbenchHomeState();
 }
@@ -42,6 +68,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   bool busy = false;
   String search = '';
   String entryKind = 'papers';
+  String? lastExportPath;
   static const labels = ['概览', '文库与证据', '研究任务', '运行结果', '论文写作', '研究关系'];
   static const icons = [
     Icons.space_dashboard_outlined,
@@ -96,6 +123,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       ) ??
       false;
   Future<String?> pickFile(List<String> extensions) async {
+    if (widget.pickImportFile != null) {
+      return widget.pickImportFile!(extensions);
+    }
     final files = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: extensions,
@@ -124,8 +154,40 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     });
   }
 
-  Future<String?> destination() =>
-      FilePicker.getDirectoryPath(dialogTitle: '选择导出目录');
+  String get exportDirectory => p.join(store.rootPath, 'exports');
+
+  Future<void> saveGenerated(String path, String mimeType) async {
+    lastExportPath = path;
+    final bytes = Uint8List.fromList(await File(path).readAsBytes());
+    final name = p.basename(path);
+    final uri =
+        await (widget.saveExportFile?.call(name, bytes, mimeType) ??
+            FilePicker.saveFile(
+              fileName: name,
+              bytes: bytes,
+              mimeType: mimeType,
+            ));
+    if (uri != null) {
+      message('已保存到 ${uri.toString()}');
+    } else {
+      message('已取消保存；生成的文件仍在本机资料库。');
+    }
+  }
+
+  Future<void> importTask() async {
+    final path = await pickFile(['zip']);
+    if (path == null || !mounted) return;
+    if (!await confirm('导入任务包', '读取任务规格并保留原包，不会执行其中的命令。\n$path')) {
+      return;
+    }
+    await action(() async {
+      final task = await ResearchExchange(store).importTask(path);
+      projectId = task.projectId;
+      section = 2;
+      message('已导入任务 ${task.title} · r${task.revision}');
+    });
+  }
+
   Future<void> importResult() async {
     final path = await pickFile(['json', 'zip']);
     if (path == null || !mounted) return;
@@ -137,6 +199,52 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     });
   }
 
+  Future<void> importLanFile(String path, String kind) async {
+    final exchange = ResearchExchange(store);
+    if (kind == 'task') {
+      final task = await exchange.importTask(path);
+      if (mounted) {
+        setState(() {
+          projectId = task.projectId;
+          section = 2;
+        });
+      }
+    } else if (kind == 'result') {
+      final run = await exchange.importResult(path);
+      final task = store.taskRevision(run.taskId, run.taskRevision)!;
+      if (mounted) {
+        setState(() {
+          projectId = task.projectId;
+          section = 3;
+        });
+      }
+    } else if (kind == 'research') {
+      final project = await exchange.importResearch(path);
+      if (mounted) {
+        setState(() {
+          projectId = project.id;
+          section = 0;
+        });
+      }
+    } else {
+      throw const FormatException('Unknown received content type');
+    }
+    message('局域网文件已导入本机资料库。');
+  }
+
+  Future<void> openLan() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LanTransferPage(
+          rootPath: store.rootPath,
+          suggestedFile: lastExportPath,
+          onImport: importLanFile,
+        ),
+      ),
+    );
+    if (mounted) refresh();
+  }
+
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 720;
@@ -145,13 +253,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       appBar: AppBar(
         title: Text(wide ? '研究工作台 · ${labels[section]}' : labels[section]),
         actions: [
+          IconButton(
+            tooltip: '局域网传输',
+            onPressed: openLan,
+            icon: const Icon(Icons.wifi_tethering_outlined),
+          ),
           PopupMenuButton<String>(
             tooltip: '导入材料',
-            onSelected: (v) =>
-                v == 'result' ? importResult() : importResearch(v == 'folder'),
+            onSelected: (v) => switch (v) {
+              'result' => importResult(),
+              'task' => importTask(),
+              _ => importResearch(v == 'folder'),
+            },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'folder', child: Text('导入研究目录')),
               PopupMenuItem(value: 'zip', child: Text('导入研究 ZIP')),
+              PopupMenuItem(value: 'task', child: Text('导入任务包')),
               PopupMenuItem(value: 'result', child: Text('导入结果包')),
             ],
           ),
@@ -302,6 +419,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     onPressed: busy ? null : () => importResearch(false),
                     icon: const Icon(Icons.archive_outlined),
                     label: const Text('导入 ZIP'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: busy ? null : importTask,
+                    icon: const Icon(Icons.assignment_outlined),
+                    label: const Text('导入任务包'),
                   ),
                 ],
               ),
@@ -730,6 +852,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             icon: const Icon(Icons.file_download_outlined),
             label: const Text('导入运行结果'),
           ),
+          OutlinedButton.icon(
+            onPressed: importTask,
+            icon: const Icon(Icons.archive_outlined),
+            label: const Text('导入任务包'),
+          ),
         ],
       ),
       const Text('任务导出为离线包。另一台设备按说明执行，再填写结果包带回。工作台不会执行包内命令。'),
@@ -754,17 +881,27 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     onPressed: () => editTask(t),
                     child: const Text('编辑并保存新修订'),
                   ),
+                  OutlinedButton(
+                    onPressed: () async {
+                      if (await confirm(
+                        '开始执行记录',
+                        '请先核对任务规格、代码、数据和环境。工作台只记录状态；执行命令需要你在可信工具中明确启动。',
+                      )) {
+                        store.startManualRun(t);
+                        setState(() => section = 3);
+                        message('执行记录已开始；在外部工具运行后填写状态与结果。');
+                      }
+                    },
+                    child: const Text('开始执行记录'),
+                  ),
                   FilledButton.icon(
                     onPressed: () async {
-                      final dir = await destination();
-                      if (dir != null) {
-                        await action(() async {
-                          final path = await ResearchExchange(
-                            store,
-                          ).exportTask(t, dir);
-                          message('任务包已导出：$path');
-                        });
-                      }
+                      await action(() async {
+                        final path = await ResearchExchange(
+                          store,
+                        ).exportTask(t, exportDirectory);
+                        await saveGenerated(path, 'application/zip');
+                      });
                     },
                     icon: const Icon(Icons.upload_file_outlined),
                     label: const Text('导出离线任务包'),
@@ -897,15 +1034,25 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               ),
               SelectableText('Task ID：${run.taskId}'),
               const SizedBox(height: 12),
-              SelectableText(
-                const JsonEncoder.withIndent('  ').convert(run.data),
-              ),
-              const SizedBox(height: 12),
               Wrap(
                 spacing: 10,
                 runSpacing: 8,
                 children: [
-                  if (!run.accepted)
+                  if (run.data['_localManual'] == true) ...[
+                    OutlinedButton(
+                      onPressed: () => editRun(run),
+                      child: const Text('更新执行记录'),
+                    ),
+                    FilledButton(
+                      onPressed: () => exportRun(run),
+                      child: const Text('导出结果包'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => exportRun(run, chooseArtifacts: true),
+                      child: const Text('附加产物并导出'),
+                    ),
+                  ],
+                  if (!run.accepted && run.data['_localManual'] != true)
                     FilledButton(
                       onPressed: () async {
                         if (await confirm(
@@ -925,12 +1072,139 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     ),
                 ],
               ),
+              const SizedBox(height: 8),
+              ExpansionTile(
+                title: const Text('原始运行记录'),
+                children: [
+                  SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(run.data),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
       if (runs.isEmpty) const Text('尚无返回结果。离线任务包内提供结果格式说明。'),
     ]);
+  }
+
+  Future<void> exportRun(
+    ResearchRun run, {
+    bool chooseArtifacts = false,
+  }) async {
+    var paths = <String>[];
+    if (chooseArtifacts) {
+      final files = await FilePicker.pickFiles(type: FileType.any);
+      paths = [
+        for (final file in files)
+          if (file.path != null) file.path!,
+      ];
+      if (paths.isEmpty) return;
+    }
+    await action(() async {
+      final path = await ResearchExchange(
+        store,
+      ).exportResult(run, exportDirectory, artifactPaths: paths);
+      await saveGenerated(path, 'application/zip');
+    });
+  }
+
+  Future<void> editRun(ResearchRun run) async {
+    var status = run.status;
+    final metrics = TextEditingController(
+      text: const JsonEncoder.withIndent(
+        '  ',
+      ).convert(run.data['metrics'] ?? {}),
+    );
+    final log = TextEditingController();
+    final conclusion = TextEditingController(
+      text: '${run.data['conclusion'] ?? ''}',
+    );
+    String? error;
+    final saved = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (c) => StatefulBuilder(
+        builder: (c, update) => AlertDialog(
+          title: const Text('更新执行记录'),
+          content: SizedBox(
+            width: 600,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DropdownButtonFormField<String>(
+                    initialValue: status,
+                    decoration: const InputDecoration(labelText: '执行状态'),
+                    items: const [
+                      DropdownMenuItem(value: 'running', child: Text('进行中')),
+                      DropdownMenuItem(value: 'completed', child: Text('已完成')),
+                      DropdownMenuItem(value: 'failed', child: Text('失败')),
+                      DropdownMenuItem(value: 'blocked', child: Text('受阻')),
+                    ],
+                    onChanged: (value) => status = value ?? status,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: metrics,
+                    minLines: 3,
+                    maxLines: 7,
+                    decoration: InputDecoration(
+                      labelText: '指标（JSON）',
+                      errorText: error,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: log,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(labelText: '执行日志'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: conclusion,
+                    minLines: 2,
+                    maxLines: 4,
+                    decoration: const InputDecoration(labelText: '结论 / 待复审'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                try {
+                  final parsed = jsonDecode(metrics.text);
+                  if (parsed is! Map<String, dynamic>) {
+                    throw const FormatException('指标须为 JSON 对象');
+                  }
+                  Navigator.pop(c, parsed);
+                } catch (e) {
+                  update(() => error = '$e');
+                }
+              },
+              child: const Text('保存执行记录'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved != null) {
+      store.updateManualRun(
+        run.id,
+        status: status,
+        metrics: saved,
+        log: log.text,
+        conclusion: conclusion.text,
+      );
+      refresh();
+    }
   }
 
   Future<void> linkEvidence(String id) async {
@@ -977,15 +1251,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         children: [
           FilledButton.icon(
             onPressed: () async {
-              final dir = await destination();
-              if (dir != null) {
-                await action(() async {
-                  final path = await ResearchExchange(
-                    store,
-                  ).exportReport(p.id, dir);
-                  message('Markdown 报告已导出：$path');
-                });
-              }
+              await action(() async {
+                final path = await ResearchExchange(
+                  store,
+                ).exportReport(p.id, exportDirectory);
+                await saveGenerated(path, 'text/markdown');
+              });
             },
             icon: const Icon(Icons.description_outlined),
             label: const Text('导出 Markdown 研究报告'),

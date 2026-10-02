@@ -222,6 +222,128 @@ class ResearchExchange {
     return file.path;
   }
 
+  Future<Set<String>> _verifyManifest(Directory snapshot, String kind) async {
+    final file = File(p.join(snapshot.path, 'manifest.json'));
+    if (!await file.exists()) {
+      throw const FormatException('Missing manifest.json');
+    }
+    final manifest = WorkbenchStore.decode(await file.readAsString());
+    if (manifest['format'] != 'research-package-v1' ||
+        manifest['kind'] != kind ||
+        manifest['files'] is! List) {
+      throw const FormatException('Unsupported package manifest');
+    }
+    final listed = <String>{};
+    for (final item in manifest['files'] as List) {
+      if (item is! Map ||
+          item['path'] is! String ||
+          item['bytes'] is! int ||
+          item['sha256'] is! String) {
+        throw const FormatException('Invalid manifest file entry');
+      }
+      final safe = _safe(item['path'] as String);
+      if (!listed.add(safe)) {
+        throw FormatException('Duplicate manifest path: $safe');
+      }
+      final member = File(p.join(snapshot.path, safe));
+      if (!await member.exists() || await member.length() != item['bytes']) {
+        throw FormatException(
+          'Missing or changed package file: ${item['path']}',
+        );
+      }
+      final digest = await sha256.bind(member.openRead()).first;
+      if (digest.toString() != item['sha256']) {
+        throw FormatException('Package checksum mismatch: ${item['path']}');
+      }
+    }
+    final required = kind == 'task' ? 'task.json' : 'result.json';
+    if (!listed.contains(required)) {
+      throw FormatException('Package manifest must verify $required');
+    }
+    return listed;
+  }
+
+  /// Import a task specification without running its command or opening its data.
+  Future<ResearchTask> importTask(String zipPath) async {
+    if (!zipPath.toLowerCase().endsWith('.zip')) {
+      throw const FormatException('Task package must be ZIP');
+    }
+    final snapshot = await _snapshot(zipPath, 'tasks');
+    try {
+      await _verifyManifest(snapshot, 'task');
+      final taskFile = File(p.join(snapshot.path, 'task.json'));
+      if (!await taskFile.exists()) {
+        throw const FormatException('Missing task.json');
+      }
+      final data = WorkbenchStore.decode(await taskFile.readAsString());
+      final id = data['taskId'], revision = data['taskRevision'];
+      final projectId = data['projectId'], title = data['title'];
+      final goal = data['goal'], spec = data['spec'];
+      if (data['format'] != 'research-task-v1' ||
+          id is! String ||
+          id.isEmpty ||
+          revision is! int ||
+          revision < 1 ||
+          projectId is! String ||
+          projectId.isEmpty ||
+          title is! String ||
+          title.trim().isEmpty ||
+          goal is! String ||
+          spec is! Map<String, dynamic>) {
+        throw const FormatException('Invalid task specification');
+      }
+      final existing = store.taskRevision(id, revision);
+      if (existing != null) {
+        if (existing.projectId != projectId ||
+            existing.title != title ||
+            existing.goal != goal ||
+            jsonEncode(existing.spec) != jsonEncode(spec)) {
+          throw const FormatException(
+            'Task revision conflicts with local data',
+          );
+        }
+        await snapshot.delete(recursive: true);
+        return existing;
+      }
+      final digest = await sha256.bind(File(zipPath).openRead()).first;
+      store.db.execute('BEGIN');
+      try {
+        if (store.db.select('SELECT id FROM projects WHERE id=?', [
+          projectId,
+        ]).isEmpty) {
+          store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
+            projectId,
+            '接收任务 · $title',
+            goal,
+            '确认环境后由用户手动开始执行记录',
+          ]);
+        }
+        store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)', [
+          id,
+          revision,
+          projectId,
+          title,
+          goal,
+          jsonEncode(spec),
+        ]);
+        store.db.execute('INSERT INTO task_imports VALUES(?,?,?,?)', [
+          id,
+          revision,
+          store.storedPath(snapshot.path),
+          digest.toString(),
+        ]);
+        store.db.execute('COMMIT');
+      } catch (_) {
+        store.db.execute('ROLLBACK');
+        rethrow;
+      }
+      return store.taskRevision(id, revision)!;
+    } catch (_) {
+      if (await snapshot.exists()) await snapshot.delete(recursive: true);
+      rethrow;
+    }
+  }
+
   Future<String> exportTask(
     ResearchTask task,
     String destinationDirectory,
@@ -278,9 +400,77 @@ class ResearchExchange {
     );
   }
 
+  /// Package a user-recorded run and explicitly chosen artifacts for return.
+  Future<String> exportResult(
+    ResearchRun run,
+    String destinationDirectory, {
+    List<String> artifactPaths = const [],
+  }) async {
+    final rows = store.db.select('SELECT * FROM runs WHERE id=?', [run.id]);
+    if (rows.isEmpty) throw StateError('Unknown run');
+    final current = store.runFromRow(rows.single);
+    if (current.data['_localManual'] != true ||
+        store.taskRevision(current.taskId, current.taskRevision) == null) {
+      throw StateError('Only a recorded local task run can be exported');
+    }
+    final files = <String, List<int>>{};
+    final artifacts = <Map<String, dynamic>>[];
+    var total = 0;
+    for (var i = 0; i < artifactPaths.length; i++) {
+      final source = File(artifactPaths[i]);
+      if (await FileSystemEntity.type(source.path, followLinks: false) !=
+          FileSystemEntityType.file) {
+        throw const FormatException('Artifact must be a regular file');
+      }
+      final length = await source.length();
+      if (length > maxFileBytes || (total += length) > maxBytes) {
+        throw const FormatException('Artifacts exceed package size limit');
+      }
+      final name = _safe('artifacts/${i + 1}-${p.basename(source.path)}');
+      files[name] = await source.readAsBytes();
+      artifacts.add({'path': name, 'name': p.basename(source.path)});
+    }
+    final result = <String, dynamic>{
+      'format': 'research-result-v1',
+      'runId': current.id,
+      'taskId': current.taskId,
+      'taskRevision': current.taskRevision,
+      'status': current.status,
+      'metrics': current.data['metrics'] ?? <String, dynamic>{},
+      'logs': current.data['logs'] ?? <String>[],
+      'conclusion': current.data['conclusion'] ?? '',
+      'artifacts': artifacts,
+    };
+    files['result.json'] = utf8.encode(
+      const JsonEncoder.withIndent('  ').convert(result),
+    );
+    files['manifest.json'] = utf8.encode(
+      jsonEncode({
+        'format': 'research-package-v1',
+        'kind': 'result',
+        'files': [
+          for (final entry in files.entries)
+            {
+              'path': entry.key,
+              'bytes': entry.value.length,
+              'sha256': sha256.convert(entry.value).toString(),
+            },
+        ],
+      }),
+    );
+    return _zip(
+      files,
+      destinationDirectory,
+      'result-${current.id}-${const Uuid().v4()}.zip',
+    );
+  }
+
   Future<ResearchRun> importResult(String jsonOrZipPath) async {
     final snapshot = await _snapshot(jsonOrZipPath, 'results');
     try {
+      final verifiedPaths = jsonOrZipPath.toLowerCase().endsWith('.zip')
+          ? await _verifyManifest(snapshot, 'result')
+          : <String>{};
       final files = await snapshot
           .list(recursive: true)
           .where((e) => e is File && p.basename(e.path) == 'result.json')
@@ -328,7 +518,11 @@ class ResearchExchange {
         if (path is! String) {
           throw const FormatException('Artifacts need relative paths');
         }
-        if (!await File(p.join(snapshot.path, _safe(path))).exists()) {
+        final safe = _safe(path);
+        if (verifiedPaths.isNotEmpty && !verifiedPaths.contains(safe)) {
+          throw FormatException('Unverified artifact: $path');
+        }
+        if (!await File(p.join(snapshot.path, safe)).exists()) {
           throw FormatException('Missing artifact: $path');
         }
       }
