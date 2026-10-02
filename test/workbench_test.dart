@@ -284,4 +284,60 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('phone user explicitly starts and updates an execution record', (
+    tester,
+  ) async {
+    store.saveTask(
+      projectId: projectId,
+      title: 'Compare results',
+      goal: 'Measure and return a result',
+      spec: {'command': 'manual-only'},
+    );
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.byTooltip('导入材料'));
+    await settle(tester);
+    expect(find.text('导入任务包'), findsOneWidget);
+    await tester.tapAt(const Offset(20, 250));
+    await settle(tester);
+    await tester.tap(find.byType(NavigationDestination).at(2));
+    await settle(tester);
+    expect(find.textContaining('Compare results'), findsWidgets);
+    await tester.tap(find.text('开始执行记录'));
+    await settle(tester);
+    await tester.tap(find.text('确认'));
+    await settle(tester);
+    expect(store.runs(projectId).single.status, 'running');
+    await tester.tap(find.byType(NavigationDestination).at(3));
+    await settle(tester);
+    await tester.tap(find.text('更新执行记录'));
+    await settle(tester);
+    await tester.enterText(field('指标（JSON）'), '{"score":0.82}');
+    await tester.enterText(field('执行日志'), 'Run completed manually');
+    await tester.enterText(field('结论 / 待复审'), 'Needs replication');
+    await tester.tap(find.text('保存执行记录'));
+    await settle(tester);
+    final run = store.runs(projectId).single;
+    expect(run.data['metrics']['score'], 0.82);
+    expect(run.data['conclusion'], 'Needs replication');
+    expect(run.data['logs'], contains('Run completed manually'));
+    expect(find.text('导出结果包'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('LAN transfer opens without starting a listener', (tester) async {
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.byTooltip('局域网传输'));
+    await settle(tester);
+    expect(find.text('未开启共享'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

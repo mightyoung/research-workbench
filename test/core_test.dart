@@ -194,4 +194,65 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       ..close();
     expect(() => WorkbenchStore.open(root), throwsStateError);
   });
+  test(
+    'a received task can be explicitly recorded and returned with data',
+    () async {
+      final source = Directory(p.join(temp.path, 'source'))..createSync();
+      File(p.join(source.path, 'README.md')).writeAsStringSync('# Source');
+      final project = await exchange.importResearch(source.path);
+      final marker = File(p.join(temp.path, 'must-not-run'));
+      final task = store.saveTask(
+        projectId: project.id,
+        title: 'Remote measurement',
+        goal: 'Return measured value and raw data',
+        spec: {
+          'command': 'touch ${marker.path}',
+          'codeReference': 'commit:abc',
+        },
+      );
+      final taskPackage = await exchange.exportTask(task, temp.path);
+
+      final receiver = WorkbenchStore.open(p.join(temp.path, 'receiver'));
+      addTearDown(receiver.close);
+      final received = await (ResearchExchange(receiver) as dynamic).importTask(
+        taskPackage,
+      );
+      expect(received.id, task.id);
+      expect(received.revision, 1);
+      expect(receiver.tasks(project.id).single.title, 'Remote measurement');
+      expect(marker.existsSync(), false);
+
+      final run = (receiver as dynamic).startManualRun(received);
+      expect(run.status, 'running');
+      final updated = (receiver as dynamic).updateManualRun(
+        run.id,
+        status: 'completed',
+        metrics: {'score': 0.82},
+        log: 'Executed manually on the receiving device',
+        conclusion: 'Promising; review the raw data',
+      );
+      final artifact = File(p.join(temp.path, 'raw.csv'))
+        ..writeAsStringSync('step,value\n1,0.82\n');
+      final resultPackage = await (ResearchExchange(receiver) as dynamic)
+          .exportResult(updated, temp.path, artifactPaths: [artifact.path]);
+      expect(marker.existsSync(), false);
+
+      final imported = await exchange.importResult(resultPackage);
+      expect(imported.accepted, false);
+      expect(imported.taskId, task.id);
+      expect(imported.taskRevision, task.revision);
+      expect(imported.data['metrics']['score'], 0.82);
+      expect(imported.data['conclusion'], 'Promising; review the raw data');
+      expect(imported.data['artifacts'], isNotEmpty);
+      final savedArtifact = imported.data['artifacts'].single['path'] as String;
+      expect(
+        File(
+          p.join(store.resolvePath(imported.data['_snapshotPath'] as String), savedArtifact),
+        ).readAsStringSync(),
+        'step,value\n1,0.82\n',
+      );
+      store.acceptRun(imported.id);
+      expect(store.runs(project.id).single.accepted, true);
+    },
+  );
 }

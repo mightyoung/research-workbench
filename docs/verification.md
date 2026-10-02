@@ -1,5 +1,11 @@
 # 验证记录（2026-10-02）
 
+## 本地功能修复（尚未推送）
+
+- 临时工作副本执行 `flutter analyze`：0 问题；`flutter test --reporter expanded`：18 项通过。新增跨设备任务 ZIP 导入、用户显式执行记录、带附件结果 ZIP 回传的真实文件测试；新增回环地址上的短期配对、仅共享用户选定文件的 LAN 测试；手机控件测试覆盖任务执行状态编辑与 LAN 入口未监听状态。
+- 导出界面改用 `file_picker` 的 `saveFile(bytes: ...)`，以支持 Android 系统文件保存 URI；这一原生对话框尚未在健康 Android 设备验收。
+- 先前的 Android APK 与下方原生截图属于旧开发版，**不包含本节功能改动**。本节不声称 Android、macOS 或 Windows 原生验收通过。
+
 ## 已验证
 
 - `flutter analyze`：目标仓库无问题，原始输出保存在本机忽略目录 `artifacts/analyze.log`。

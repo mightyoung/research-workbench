@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,document_id TEXT REFERENCES
 CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT,evidence_id TEXT);''',
     ),
     _relativeSnapshotPaths,
+    (db) => db.execute(
+      'CREATE TABLE IF NOT EXISTS task_imports(task_id TEXT,revision INTEGER,package_path TEXT,package_sha256 TEXT,PRIMARY KEY(task_id,revision),FOREIGN KEY(task_id,revision) REFERENCES tasks(id,revision))',
+    ),
   ];
   static int get schemaVersion => _migrations.length;
 
@@ -239,6 +242,84 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
 
   void acceptRun(String runId) =>
       db.execute('UPDATE runs SET accepted=1 WHERE id=?', [runId]);
+
+  /// Starts a record for work the user chooses to perform in another tool.
+  /// Task commands are data and are never launched by this method.
+  ResearchRun startManualRun(ResearchTask task) {
+    if (taskRevision(task.id, task.revision) == null) {
+      throw StateError('Unknown task revision');
+    }
+    final id = const Uuid().v4();
+    final data = <String, dynamic>{
+      'format': 'research-result-v1',
+      'runId': id,
+      'taskId': task.id,
+      'taskRevision': task.revision,
+      'status': 'running',
+      'metrics': <String, dynamic>{},
+      'logs': <String>[],
+      'artifacts': <String>[],
+      'conclusion': '',
+      '_localManual': true,
+    };
+    db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?)', [
+      id,
+      task.id,
+      task.revision,
+      'running',
+      0,
+      jsonEncode(data),
+    ]);
+    return ResearchRun(
+      id: id,
+      taskId: task.id,
+      taskRevision: task.revision,
+      status: 'running',
+      accepted: false,
+      data: data,
+    );
+  }
+
+  ResearchRun updateManualRun(
+    String runId, {
+    required String status,
+    required Map<String, dynamic> metrics,
+    required String log,
+    required String conclusion,
+  }) {
+    if (!const {'running', 'completed', 'failed', 'blocked'}.contains(status)) {
+      throw FormatException('Unsupported execution status: $status');
+    }
+    final rows = db.select('SELECT * FROM runs WHERE id=?', [runId]);
+    if (rows.isEmpty) throw StateError('Unknown run');
+    final old = runFromRow(rows.single);
+    if (old.data['_localManual'] != true) {
+      throw StateError('Only local manual runs can be edited');
+    }
+    final logs = List<String>.from(old.data['logs'] as List? ?? []);
+    if (log.trim().isNotEmpty) logs.add(log.trim());
+    final data = <String, dynamic>{
+      ...old.data,
+      'status': status,
+      'metrics': metrics,
+      'logs': logs,
+      'conclusion': conclusion.trim(),
+    };
+    db.execute('UPDATE runs SET status=?,data=? WHERE id=?', [
+      status,
+      jsonEncode(data),
+      runId,
+    ]);
+    return ResearchRun(
+      id: runId,
+      taskId: old.taskId,
+      taskRevision: old.taskRevision,
+      status: status,
+      accepted: old.accepted,
+      data: data,
+    );
+  }
+
   void addOutline(String projectId, String heading, String evidenceId) =>
       db.execute('INSERT INTO outline VALUES(?,?,?,?)', [
         const Uuid().v4(),
