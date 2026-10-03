@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:research_workbench/core/exchange.dart';
 import 'package:research_workbench/core/models.dart';
+import 'package:research_workbench/core/result_payload.dart';
 import 'package:research_workbench/core/research_skill.dart';
 import 'package:research_workbench/core/store.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -22,6 +24,449 @@ void main() {
     store.close();
     temp.deleteSync(recursive: true);
   });
+
+  ResearchTask resultTask() {
+    store.db.execute(
+      'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+      ['result-project', 'Result project', '', ''],
+    );
+    return store.saveTask(
+      projectId: 'result-project',
+      title: 'Measure',
+      goal: 'Report',
+      spec: {},
+    );
+  }
+
+  ResearchRun completedRun(ResearchTask task) => store.updateManualRun(
+    store.startManualRun(task).id,
+    status: 'completed',
+    metrics: {'score': 0.82},
+    log: 'Measured manually',
+    conclusion: 'Review evidence',
+  );
+  File resultJson(Map<String, dynamic> data) =>
+      File(p.join(temp.path, 'result.json'))
+        ..writeAsStringSync(jsonEncode(data));
+  File resultZip(
+    Map<String, dynamic> data,
+    Map<String, List<int>> artifacts, {
+    bool badHash = false,
+  }) {
+    final files = {'result.json': utf8.encode(jsonEncode(data)), ...artifacts};
+    final manifest = utf8.encode(
+      jsonEncode({
+        'format': 'research-package-v1',
+        'kind': 'result',
+        'files': [
+          for (final item in files.entries)
+            {
+              'path': item.key,
+              'bytes': item.value.length,
+              'sha256': badHash && item.key != 'result.json'
+                  ? 'bad-hash'
+                  : sha256.convert(item.value).toString(),
+            },
+        ],
+      }),
+    );
+    final archive = Archive();
+    for (final item in {...files, 'manifest.json': manifest}.entries) {
+      archive.addFile(ArchiveFile(item.key, item.value.length, item.value));
+    }
+    return File(
+      p.join(temp.path, 'result-${DateTime.now().microsecondsSinceEpoch}.zip'),
+    )..writeAsBytesSync(ZipEncoder().encode(archive));
+  }
+
+  test('importedMetadataCannotEnableManualExport', () async {
+    final task = resultTask();
+    final imported = await exchange.importResult(
+      resultJson({
+        'runId': 'hostile-local-run',
+        'taskId': task.id,
+        'taskRevision': 1,
+        'status': 'completed',
+        '_localManual': true,
+        '_exportedDigest': 'attacker receipt',
+        '_snapshotPath': 'attacker path',
+      }).path,
+    );
+    expect(imported.data.containsKey('_localManual'), false);
+    expect(imported.data.containsKey('_exportedDigest'), false);
+    expect(imported.data['_snapshotPath'], isNot('attacker path'));
+    await expectLater(
+      exchange.exportResult(imported, temp.path),
+      throwsStateError,
+    );
+  });
+
+  for (final legacy in [false, true]) {
+    test(
+      legacy
+          ? 'legacyForgedReceiptCannotBypassArtifactConflict'
+          : 'forgedReceiptCannotBypassArtifactConflict',
+      () async {
+        final task = resultTask();
+        final original = <String, dynamic>{
+          'runId': 'forged-receipt-run',
+          'taskId': task.id,
+          'taskRevision': 1,
+          'status': 'completed',
+          'artifacts': [
+            {'path': 'artifacts/original.csv'},
+          ],
+        };
+        final changed = <String, dynamic>{
+          ...original,
+          'artifacts': [
+            {'path': 'artifacts/changed.csv'},
+          ],
+        };
+        final receipt = sha256
+            .convert(
+              utf8.encode(
+                jsonEncode(
+                  publicResult({
+                    'result': publicResult(changed),
+                    'artifactHashes': {
+                      'artifacts/changed.csv': sha256
+                          .convert(utf8.encode('changed'))
+                          .toString(),
+                    },
+                  }),
+                ),
+              ),
+            )
+            .toString();
+        final malicious = {
+          ...original,
+          '_localManual': true,
+          '_exportedDigest': receipt,
+          '_snapshotPath': 'attacker path',
+        };
+        final imported = await exchange.importResult(
+          resultZip(legacy ? original : malicious, {
+            'artifacts/original.csv': utf8.encode('original'),
+          }).path,
+        );
+        if (legacy) {
+          store.db.execute('UPDATE runs SET data=? WHERE id=?', [
+            jsonEncode({
+              ...imported.data,
+              '_localManual': true,
+              '_exportedDigest': receipt,
+            }),
+            imported.id,
+          ]);
+        }
+        store.acceptRun(imported.id);
+        final repeated = await exchange.importResult(
+          resultZip(legacy ? original : malicious, {
+            'artifacts/original.csv': utf8.encode('original'),
+          }).path,
+        );
+        expect(repeated.id, imported.id);
+        expect(repeated.accepted, true);
+        if (!legacy) {
+          final originalBytes = WorkbenchStore.decode(
+            File(
+              p.join(
+                store.resolvePath(imported.data['_snapshotPath'] as String),
+                'result.json',
+              ),
+            ).readAsStringSync(),
+          );
+          expect(originalBytes['_localManual'], true);
+          expect(originalBytes['_exportedDigest'], receipt);
+        }
+        await expectLater(
+          exchange.importResult(
+            resultZip(changed, {
+              'artifacts/changed.csv': utf8.encode('changed'),
+            }).path,
+          ),
+          throwsFormatException,
+        );
+        final stored = store.runs(task.projectId).single;
+        expect(stored.data['artifacts'], original['artifacts']);
+        expect(stored.accepted, true);
+        expect(
+          File(
+            p.join(
+              store.resolvePath(stored.data['_snapshotPath'] as String),
+              'artifacts/original.csv',
+            ),
+          ).readAsStringSync(),
+          'original',
+        );
+      },
+    );
+  }
+
+  test('exportPreservesPublicExtensions', () async {
+    final task = resultTask();
+    final run = completedRun(task);
+    store.db.execute('UPDATE runs SET data=? WHERE id=?', [
+      jsonEncode({
+        ...run.data,
+        '_domainField': {
+          'nested': {'_localManual': 'public value'},
+        },
+      }),
+      run.id,
+    ]);
+    final zip = await exchange.exportResult(run, temp.path);
+    final archive = ZipDecoder().decodeBytes(await File(zip).readAsBytes());
+    final payload = WorkbenchStore.decode(
+      utf8.decode(archive.findFile('result.json')!.content as List<int>),
+    );
+    expect(payload['_domainField'], {
+      'nested': {'_localManual': 'public value'},
+    });
+    expect(payload.containsKey('_localManual'), false);
+    expect(payload.containsKey('_snapshotPath'), false);
+    expect(payload.containsKey('_exportedDigest'), false);
+  });
+
+  test('localExportReimportIsIdempotent', () async {
+    final task = resultTask();
+    final original = completedRun(task);
+    store.acceptRun(original.id);
+    final imported = await exchange.importResult(
+      await exchange.exportResult(original, temp.path),
+    );
+    expect(imported.id, original.id);
+    expect(store.runs(task.projectId), hasLength(1));
+    expect(imported.accepted, true);
+    expect(store.runs(task.projectId).single.accepted, true);
+  });
+  test('resultMapOrderDoesNotConflict', () async {
+    final task = resultTask();
+    final data = <String, dynamic>{
+      'runId': 'ordered-run',
+      'taskId': task.id,
+      'taskRevision': 1,
+      'status': 'completed',
+      'metrics': {
+        'first': 1,
+        'second': {'a': 2, 'b': 3},
+      },
+      'extension': {
+        '_domainField': 4,
+        'values': [1, 2],
+      },
+    };
+    final original = await exchange.importResult(resultJson(data).path);
+    store.acceptRun(original.id);
+    final reordered = <String, dynamic>{
+      for (final entry in data.entries.toList().reversed)
+        entry.key: entry.value,
+      'metrics': {
+        'second': {'b': 3, 'a': 2},
+        'first': 1,
+      },
+      '_localManual': false,
+      '_snapshotPath': 'ignored',
+      '_exportedDigest': 'ignored',
+    };
+    final imported = await exchange.importResult(resultJson(reordered).path);
+    expect(imported.id, original.id);
+    expect(imported.accepted, true);
+    expect(store.runs(task.projectId), hasLength(1));
+    await expectLater(
+      exchange.importResult(
+        resultJson({
+          ...data,
+          'extension': {
+            '_domainField': 5,
+            'values': [1, 2],
+          },
+        }).path,
+      ),
+      throwsFormatException,
+    );
+    await expectLater(
+      exchange.importResult(
+        resultJson({
+          ...data,
+          'extension': {
+            '_domainField': 4,
+            'values': [2, 1],
+          },
+        }).path,
+      ),
+      throwsFormatException,
+    );
+  });
+  test('changedMetricSameIdConflicts', () async {
+    final task = resultTask();
+    final data = {
+      'runId': 'metric-run',
+      'taskId': task.id,
+      'taskRevision': 1,
+      'status': 'completed',
+      'metrics': {'score': 0.82},
+    };
+    final original = await exchange.importResult(resultJson(data).path);
+    store.acceptRun(original.id);
+    await expectLater(
+      exchange.importResult(
+        resultJson({
+          ...data,
+          'metrics': {'score': 0.99},
+        }).path,
+      ),
+      throwsFormatException,
+    );
+    expect(store.runs(task.projectId).single.data['metrics'], {'score': 0.82});
+    expect(store.runs(task.projectId).single.accepted, true);
+  });
+  test('firstImportOnOtherStoreAndRepeat', () async {
+    final task = resultTask();
+    final original = completedRun(task);
+    final taskZip = await exchange.exportTask(task, temp.path);
+    final zip = await exchange.exportResult(original, temp.path);
+    final other = WorkbenchStore.open(p.join(temp.path, 'other-store'));
+    try {
+      final remote = ResearchExchange(other);
+      await remote.importTask(taskZip);
+      final first = await remote.importResult(zip);
+      expect(first.id, original.id);
+      expect(first.accepted, false);
+      expect(store.runs(task.projectId).single.accepted, false);
+      other.acceptRun(first.id);
+      expect((await remote.importResult(zip)).accepted, true);
+      expect(other.runs(task.projectId), hasLength(1));
+    } finally {
+      other.close();
+    }
+  });
+  test('manualArtifactExportReimportsExactZip', () async {
+    final task = resultTask();
+    final original = completedRun(task);
+    final artifact = File(p.join(temp.path, 'raw.csv'))
+      ..writeAsStringSync('1,0.82');
+    final zip = await exchange.exportResult(
+      original,
+      temp.path,
+      artifactPaths: [artifact.path],
+    );
+    final receipt = store.runs(task.projectId).single.data['_exportedDigest'];
+    expect(receipt, isA<String>());
+    expect((await exchange.importResult(zip)).id, original.id);
+    expect((await exchange.importResult(zip)).accepted, false);
+    expect(store.runs(task.projectId), hasLength(1));
+    await exchange.exportResult(
+      original,
+      temp.path,
+      artifactPaths: [artifact.path],
+    );
+    expect(store.runs(task.projectId).single.data['_exportedDigest'], receipt);
+  });
+  test('sameArtifactNameChangedBytesConflicts', () async {
+    final task = resultTask();
+    final data = {
+      'runId': 'artifact-run',
+      'taskId': task.id,
+      'taskRevision': 1,
+      'status': 'completed',
+      'artifacts': [
+        {'path': 'artifacts/raw.csv'},
+      ],
+    };
+    final original = await exchange.importResult(
+      resultZip(data, {'artifacts/raw.csv': utf8.encode('original')}).path,
+    );
+    store.acceptRun(original.id);
+    await expectLater(
+      exchange.importResult(
+        resultZip(data, {'artifacts/raw.csv': utf8.encode('modified')}).path,
+      ),
+      throwsFormatException,
+    );
+    final saved = store.runs(task.projectId).single;
+    expect(saved.accepted, true);
+    expect(
+      File(
+        p.join(
+          store.resolvePath(saved.data['_snapshotPath'] as String),
+          'artifacts/raw.csv',
+        ),
+      ).readAsStringSync(),
+      'original',
+    );
+  });
+  test('reExportChangedRunRequiresNewRun', () async {
+    final task = resultTask();
+    final original = completedRun(task);
+    final artifact = File(p.join(temp.path, 'raw.csv'))
+      ..writeAsStringSync('original');
+    await exchange.exportResult(
+      original,
+      temp.path,
+      artifactPaths: [artifact.path],
+    );
+    final receipt = store.runs(task.projectId).single.data['_exportedDigest'];
+    artifact.writeAsStringSync('modified');
+    await expectLater(
+      exchange.exportResult(
+        original,
+        temp.path,
+        artifactPaths: [artifact.path],
+      ),
+      throwsStateError,
+    );
+    artifact.writeAsStringSync('original');
+    final changed = store.updateManualRun(
+      original.id,
+      status: 'completed',
+      metrics: {'score': 0.99},
+      log: '',
+      conclusion: 'Review evidence',
+    );
+    await expectLater(
+      exchange.exportResult(changed, temp.path, artifactPaths: [artifact.path]),
+      throwsStateError,
+    );
+    expect(store.runs(task.projectId).single.data['_exportedDigest'], receipt);
+    await exchange.exportResult(completedRun(task), temp.path);
+  });
+  test('unknownTaskRevisionAndBadArtifactStillFail', () async {
+    final task = resultTask();
+    final data = {
+      'runId': 'invalid-run',
+      'taskId': task.id,
+      'taskRevision': 1,
+      'status': 'completed',
+      'artifacts': ['artifacts/raw.csv'],
+    };
+    await expectLater(
+      exchange.importResult(
+        resultZip(
+          {...data, 'taskRevision': 99},
+          {
+            'artifacts/raw.csv': [1],
+          },
+        ).path,
+      ),
+      throwsFormatException,
+    );
+    await expectLater(
+      exchange.importResult(
+        resultZip(data, {
+          'artifacts/raw.csv': [1],
+        }, badHash: true).path,
+      ),
+      throwsFormatException,
+    );
+    await expectLater(
+      exchange.importResult(resultZip(data, {}).path),
+      throwsFormatException,
+    );
+    expect(store.runs(task.projectId), isEmpty);
+  });
+
   test(
     'research snapshot, task revision, result acceptance and report round trip',
     () async {

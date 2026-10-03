@@ -6,6 +6,64 @@ import 'package:research_workbench/app/workbench_app.dart';
 import 'package:research_workbench/core/store.dart';
 
 void main() {
+  testWidgets('completedManualRunCanBeAccepted', (tester) async {
+    final temp = Directory.systemTemp.createTempSync('run-acceptance-');
+    final store = WorkbenchStore.open(temp.path);
+    addTearDown(() {
+      store.close();
+      temp.deleteSync(recursive: true);
+    });
+    store.db.execute(
+      'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+      ['project', 'Acceptance', '', ''],
+    );
+    final task = store.saveTask(
+      projectId: 'project',
+      title: 'Measure',
+      goal: 'Report',
+      spec: {},
+    );
+    final run = store.startManualRun(task);
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(NavigationDestination).at(3));
+    await tester.pumpAndSettle();
+    expect(find.text('确认关联为证据'), findsNothing);
+    store.updateManualRun(
+      run.id,
+      status: 'completed',
+      metrics: {'score': 0.82},
+      log: '',
+      conclusion: 'Review',
+    );
+    await tester.tap(find.byType(NavigationDestination).at(0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(NavigationDestination).at(3));
+    await tester.pumpAndSettle();
+    expect(find.text('确认关联为证据'), findsOneWidget);
+    expect(store.runs('project').single.accepted, false);
+    await tester.ensureVisible(find.text('确认关联为证据'));
+    await tester.tap(find.text('确认关联为证据'));
+    await tester.pumpAndSettle();
+    expect(store.runs('project').single.accepted, false);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(store.runs('project').single.accepted, false);
+    await tester.tap(find.text('确认关联为证据'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认'));
+    await tester.pumpAndSettle();
+    expect(store.runs('project').single.accepted, true);
+    expect(find.text('确认关联为证据'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('only runs of the same task revision appear in one comparison', (
     tester,
   ) async {

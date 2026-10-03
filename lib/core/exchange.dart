@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'research_skill.dart';
+import 'result_payload.dart';
 import 'skill_bridge.dart';
 import 'store.dart';
 
@@ -174,6 +175,12 @@ class ResearchExchange {
     'workbench_assessment',
     '_skill_export',
   };
+
+  /// Exchange fields only. Local annotations stay in the store.
+  Map<String, dynamic> _publicRun(Map<String, dynamic> value) => publicResult(
+    Map<String, dynamic>.from(value)
+      ..removeWhere((key, _) => _localRunKeys.contains(key)),
+  );
 
   static Future<bool> _sameBytes(String a, String b) async =>
       sha256.convert(await File(a).readAsBytes()) ==
@@ -785,6 +792,7 @@ class ResearchExchange {
     if (rows.isEmpty) throw StateError('Unknown run');
     final current = store.runFromRow(rows.single);
     if (current.data['_localManual'] != true ||
+        current.data.containsKey('_snapshotPath') ||
         store.taskRevision(current.taskId, current.taskRevision) == null) {
       throw StateError('Only a recorded local task run can be exported');
     }
@@ -805,19 +813,16 @@ class ResearchExchange {
       files[name] = await source.readAsBytes();
       artifacts.add({'path': name, 'name': p.basename(source.path)});
     }
-    final result = <String, dynamic>{
-      'format': 'research-result-v1',
-      'runId': current.id,
-      'taskId': current.taskId,
-      'taskRevision': current.taskRevision,
-      'status': current.status,
-      'metrics': current.data['metrics'] ?? <String, dynamic>{},
-      'logs': current.data['logs'] ?? <String>[],
-      'conclusion': current.data['conclusion'] ?? '',
-      if (current.data['finishedAt'] != null)
-        'finishedAt': current.data['finishedAt'],
-      'artifacts': artifacts,
+    final result = _publicRun(current.data)..['artifacts'] = artifacts;
+    final hashes = {
+      for (final entry in files.entries)
+        entry.key: sha256.convert(entry.value).toString(),
     };
+    final digest = _resultDigest(result, hashes);
+    final previousDigest = current.data['_exportedDigest'];
+    if (previousDigest != null && previousDigest != digest) {
+      throw StateError('Result changed after export; create a new run/attempt');
+    }
     files['result.json'] = utf8.encode(
       const JsonEncoder.withIndent('  ').convert(result),
     );
@@ -835,12 +840,40 @@ class ResearchExchange {
         ],
       }),
     );
-    return _zip(
+    final path = await _zip(
       files,
       destinationDirectory,
       'result-${current.id}-${const Uuid().v4()}.zip',
     );
+    store.recordResultExport(current.id, digest);
+    return path;
   }
+
+  String _resultDigest(Map<String, dynamic> data, Map<String, String> hashes) =>
+      sha256
+          .convert(
+            utf8.encode(
+              jsonEncode(
+                publicResult({
+                  'result': publicResult(data),
+                  'artifactHashes': hashes,
+                }),
+              ),
+            ),
+          )
+          .toString();
+
+  Future<Map<String, String>> _snapshotHashes(
+    Directory snapshot,
+    Set<String> verifiedPaths,
+  ) async => {
+    for (final path in verifiedPaths.where((path) => path != 'result.json'))
+      path:
+          (await sha256
+                  .bind(File(p.join(snapshot.path, path)).openRead())
+                  .first)
+              .toString(),
+  };
 
   /// Writes an assessed run as one research-workflow `experiments` JSONL
   /// line, to append to the skill project's `research/experiments.jsonl`.
@@ -888,6 +921,7 @@ class ResearchExchange {
 
   Future<ResearchRun> importResult(String jsonOrZipPath) async {
     final snapshot = await _snapshot(jsonOrZipPath, 'results');
+    var retainConflict = false;
     try {
       final verifiedPaths = jsonOrZipPath.toLowerCase().endsWith('.zip')
           ? await _verifyManifest(snapshot, 'result')
@@ -904,10 +938,10 @@ class ResearchExchange {
       } else {
         throw const FormatException('Result ZIP must contain one result.json');
       }
-      final data = WorkbenchStore.decode(await result.readAsString())
-        // Research assessments and export bookkeeping are made in this
-        // workbench, never taken from a result package.
-        ..removeWhere((k, _) => _localRunKeys.contains(k));
+      // Local bookkeeping is never a package-controlled business field.
+      final data = _publicRun(
+        WorkbenchStore.decode(await result.readAsString()),
+      );
       final id = data['runId'],
           taskId = data['taskId'],
           revision = data['taskRevision'],
@@ -952,13 +986,44 @@ class ResearchExchange {
       }
       final previous = store.db.select('SELECT * FROM runs WHERE id=?', [id]);
       if (previous.isNotEmpty) {
-        // Compare source payloads only; workbench-local annotations differ.
-        Map<String, dynamic> source(Map<String, dynamic> d) =>
-            {...d}..removeWhere((k, _) => _localRunKeys.contains(k));
         final old = WorkbenchStore.decode(previous.first['data']);
-        if (_canonical(source(old)) != _canonical(source(data))) {
-          throw const FormatException(
-            'Run ID already exists with different contents',
+        final hashes = await _snapshotHashes(snapshot, verifiedPaths);
+        final receipt = old['_exportedDigest'];
+        final stored = _publicRun(old);
+        var same = samePublicResult(stored, data);
+        if (old['_localManual'] == true &&
+            !old.containsKey('_snapshotPath') &&
+            receipt is String) {
+          // Artifacts chosen at export live in the immutable receipt, not the
+          // editable manual record. All other current public fields must match.
+          same =
+              samePublicResult({
+                ...stored,
+                'artifacts': data['artifacts'],
+              }, data) &&
+              receipt == _resultDigest(data, hashes);
+        } else if (same) {
+          final storedSnapshot = old['_snapshotPath'];
+          final oldHashes = <String, String>{};
+          if (storedSnapshot is String) {
+            final directory = Directory(store.resolvePath(storedSnapshot));
+            if (await File(p.join(directory.path, 'manifest.json')).exists()) {
+              oldHashes.addAll(
+                await _snapshotHashes(
+                  directory,
+                  await _verifyManifest(directory, 'result'),
+                ),
+              );
+            }
+          }
+          same =
+              _resultDigest(stored, oldHashes) == _resultDigest(data, hashes);
+        }
+        if (!same) {
+          retainConflict = true;
+          throw FormatException(
+            'Run ID already exists with different contents; retained snapshot: '
+            '${snapshot.path}',
           );
         }
         await snapshot.delete(recursive: true);
@@ -982,7 +1047,7 @@ class ResearchExchange {
         data: data,
       );
     } catch (_) {
-      if (await snapshot.exists()) {
+      if (!retainConflict && await snapshot.exists()) {
         await snapshot.delete(recursive: true);
       }
       rethrow;
