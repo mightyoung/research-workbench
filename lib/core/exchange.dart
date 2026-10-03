@@ -129,6 +129,13 @@ class ResearchExchange {
   /// Finds whether a local record is cited as evidence (`?1` = local ID).
   static const _citedSql = 'SELECT 1 FROM outline WHERE evidence_id=?1';
 
+  /// Run data the workbench adds on top of an imported result payload.
+  static const _localRunKeys = {
+    '_snapshotPath',
+    'workbench_assessment',
+    '_skill_export',
+  };
+
   static Future<bool> _sameBytes(String a, String b) async =>
       sha256.convert(await File(a).readAsBytes()) ==
       sha256.convert(await File(b).readAsBytes());
@@ -612,11 +619,34 @@ class ResearchExchange {
   ) async {
     final task = store.taskRevision(run.taskId, run.taskRevision);
     if (task == null) throw StateError('Unknown task revision');
-    final record = executedExperiment(
+    // Same content keeps its revision; a corrected export appends a new one,
+    // since the skill treats each id+rev as immutable.
+    final now = DateTime.now();
+    String digest(Map<String, dynamic> r) => sha256
+        .convert(utf8.encode(_canonical({...r}..remove('updated_at'))))
+        .toString();
+    final previous = run.data['_skill_export'];
+    final prevRev = previous is Map && previous['rev'] is int
+        ? previous['rev'] as int
+        : 0;
+    final unchanged = executedExperiment(
       task: task,
       run: run,
-      now: DateTime.now(),
+      now: now,
+      rev: prevRev,
     );
+    final sameAsBefore =
+        previous is Map && previous['sha256'] == digest(unchanged);
+    final record = sameAsBefore
+        ? unchanged
+        : executedExperiment(task: task, run: run, now: now, rev: prevRev + 1);
+    store.db.execute('UPDATE runs SET data=? WHERE id=?', [
+      jsonEncode({
+        ...run.data,
+        '_skill_export': {'rev': record['rev'], 'sha256': digest(record)},
+      }),
+      run.id,
+    ]);
     await Directory(destinationDirectory).create(recursive: true);
     final file = File(
       p.join(destinationDirectory, 'experiments-${record['id']}.jsonl'),
@@ -688,9 +718,11 @@ class ResearchExchange {
       }
       final previous = store.db.select('SELECT * FROM runs WHERE id=?', [id]);
       if (previous.isNotEmpty) {
+        // Compare source payloads only; workbench-local annotations differ.
+        Map<String, dynamic> source(Map<String, dynamic> d) =>
+            {...d}..removeWhere((k, _) => _localRunKeys.contains(k));
         final old = WorkbenchStore.decode(previous.first['data']);
-        old.remove('_snapshotPath');
-        if (jsonEncode(old) != jsonEncode(data)) {
+        if (_canonical(source(old)) != _canonical(source(data))) {
           throw const FormatException(
             'Run ID already exists with different contents',
           );
