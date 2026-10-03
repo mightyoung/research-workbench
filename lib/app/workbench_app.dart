@@ -238,7 +238,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     });
   }
 
-  Future<void> importLanFile(String path, String kind) async {
+  Future<bool> importLanFile(String path, String kind) async {
     final exchange = ResearchExchange(store);
     if (kind == 'task') {
       final task = await exchange.importTask(path);
@@ -259,7 +259,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       }
     } else if (kind == 'research') {
       final target = await chooseImportTarget(path);
-      if (target == null) return;
+      if (target == null) return false;
       final project = await exchange.importResearch(
         path,
         intoProjectId: target.isEmpty ? null : target,
@@ -274,6 +274,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       throw const FormatException('Unknown received content type');
     }
     message('局域网文件已导入本机资料库。');
+    return true;
   }
 
   Future<void> openLan() async {

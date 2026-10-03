@@ -101,14 +101,30 @@ Map<String, dynamic> executedExperiment({
       source['rev'] is! int) {
     throw const FormatException('任务不是从实验计划生成的，无法写回 plan_ref');
   }
-  final assessment = run.data['workbench_assessment'];
-  if (assessment is! Map) throw const FormatException('请先评估这次运行的研究结论');
-  if (assessment['budget_spent'] is! num) {
+  final stored = run.data['workbench_assessment'];
+  if (stored is! Map) throw const FormatException('请先评估这次运行的研究结论');
+  if (stored['budget_spent'] is! num) {
     throw const FormatException('评估中缺少实际花费，research-workflow 需要它核对预算');
   }
+  if (stored['result'] is! String ||
+      stored['discriminating'] is! bool ||
+      stored['reason'] is! String) {
+    throw const FormatException('评估字段不完整或类型错误，请重新评估');
+  }
+  // Imported results can carry an assessment that never passed the rules.
+  final assessment = runAssessment(
+    status: run.status,
+    result: stored['result'] as String,
+    discriminating: stored['discriminating'] as bool,
+    reason: stored['reason'] as String,
+    budgetSpent: stored['budget_spent'] as num,
+    at: now,
+  );
   final executedAt = run.data['finishedAt'] ?? run.data['executed_at'];
-  if (executedAt is! String || executedAt.isEmpty) {
-    throw const FormatException('结果缺少执行完成时间（finishedAt）');
+  if (executedAt is! String || !_isoInstant(executedAt)) {
+    throw const FormatException(
+      '执行完成时间（finishedAt）须为带时区的 ISO-8601 时间，如 2026-10-03T08:00:00Z',
+    );
   }
   final metrics = run.data['metrics'];
   final measured = [
@@ -149,4 +165,15 @@ Map<String, dynamic> executedExperiment({
       'accepted': run.accepted,
     },
   };
+}
+
+/// ISO-8601 date-time with an explicit `Z` or UTC offset, and a real date.
+bool _isoInstant(String value) {
+  final m = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$',
+  ).firstMatch(value);
+  if (m == null) return false;
+  final (y, mo, d) = (int.parse(m[1]!), int.parse(m[2]!), int.parse(m[3]!));
+  final date = DateTime.utc(y, mo, d);
+  return date.year == y && date.month == mo && date.day == d;
 }
