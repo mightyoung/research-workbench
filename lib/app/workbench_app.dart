@@ -11,7 +11,9 @@ import '../core/exchange.dart';
 import '../core/research_kinds.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
+import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
+import 'run_assessment_dialog.dart';
 import 'theme.dart';
 
 class WorkbenchApp extends StatelessWidget {
@@ -881,6 +883,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             },
             child: const Text('关联论文提纲'),
           ),
+          if (e.kind == 'experiments' && d['phase'] != 'executed')
+            OutlinedButton(
+              onPressed: () {
+                Navigator.pop(c);
+                createTaskFromPlan(e);
+              },
+              child: const Text('生成实验任务'),
+            ),
           FilledButton(
             onPressed: () {
               Navigator.pop(c);
@@ -942,6 +952,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(t.goal),
+              if (t.spec['source'] case {'id': final id, 'rev': final rev})
+                Text('来源实验计划：$id · r$rev'),
               const SizedBox(height: 8),
               SelectableText(
                 '任务 ID：${t.id}',
@@ -1141,6 +1153,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                 for (final key in metricKeys)
                   row('指标 · $key', (run) => metric(run, key)),
                 row('结论', (run) => '${run.data['conclusion'] ?? '—'}'),
+                row('研究结论', (run) {
+                  final result = fieldValue(
+                    run.data,
+                    'workbench_assessment.result',
+                  );
+                  return result == null ? '未评估' : displayValue(result);
+                }),
                 row(
                   '产物数',
                   (run) => '${(run.data['artifacts'] as List?)?.length ?? 0}',
@@ -1181,6 +1200,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                 '${run.status} · 任务 r${run.taskRevision} · ${run.accepted ? '已关联证据' : '待接纳'}',
               ),
               SelectableText('Task ID：${run.taskId}'),
+              if (assessmentSummary(run) case final summary?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: SelectableText(summary),
+                ),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 10,
@@ -1218,6 +1242,25 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                       onPressed: () => linkEvidence(run.id),
                       child: const Text('关联论文提纲'),
                     ),
+                  if (run.status == 'completed' || run.status == 'failed')
+                    OutlinedButton(
+                      onPressed: () => assessRun(run),
+                      child: const Text('评估研究结论'),
+                    ),
+                  if (run.data['workbench_assessment'] != null &&
+                      store
+                              .taskRevision(run.taskId, run.taskRevision)
+                              ?.spec['source'] !=
+                          null)
+                    FilledButton.tonal(
+                      onPressed: () => action(() async {
+                        final path = await ResearchExchange(
+                          store,
+                        ).exportSkillExperiment(run, exportDirectory);
+                        await saveGenerated(path, 'application/x-ndjson');
+                      }),
+                      child: const Text('导出给 research-workflow'),
+                    ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -1235,6 +1278,39 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       ),
       if (runs.isEmpty) const Text('尚无返回结果。离线任务包内提供结果格式说明。'),
     ]);
+  }
+
+  Future<void> assessRun(ResearchRun run) async {
+    final input = await showRunAssessmentDialog(context, run);
+    if (input == null) return;
+    try {
+      store.assessRun(
+        run.id,
+        result: input.result,
+        discriminating: input.discriminating,
+        reason: input.reason,
+        budgetSpent: input.budgetSpent,
+      );
+      refresh();
+    } on FormatException catch (e) {
+      message('评估未保存：${e.message}');
+    }
+  }
+
+  void createTaskFromPlan(ResearchEntry plan) {
+    try {
+      final draft = taskFromExperiment(plan);
+      final task = store.saveTask(
+        projectId: plan.projectId,
+        title: draft.title,
+        goal: draft.goal,
+        spec: draft.spec,
+      );
+      setState(() => section = 2);
+      message('已生成任务 ${task.title}，可编辑补充代码、数据与环境');
+    } on FormatException catch (e) {
+      message('未生成任务：${e.message}');
+    }
   }
 
   Future<void> exportRun(

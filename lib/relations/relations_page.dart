@@ -170,6 +170,12 @@ class _RelationsPageState extends State<RelationsPage> {
           );
         }
       }
+      if (object.kind == 'task' &&
+          data['spec'] is Map &&
+          data['spec']['source'] is Map) {
+        final ref = data['spec']['source'] as Map;
+        _reference(object, '${ref['kind']}', ref['id'], ref['rev'], '实施计划');
+      }
       if (object.kind == 'run') {
         _reference(
           object,

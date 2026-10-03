@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
+import 'skill_bridge.dart';
 
 class WorkbenchStore {
   WorkbenchStore._(this.rootPath, this.db);
@@ -260,6 +261,32 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
   void acceptRun(String runId) =>
       db.execute('UPDATE runs SET accepted=1 WHERE id=?', [runId]);
 
+  /// Records what a finished run means for its hypothesis; see
+  /// [runAssessment]. Execution status and acceptance are left untouched.
+  void assessRun(
+    String runId, {
+    required String result,
+    required bool discriminating,
+    required String reason,
+    num? budgetSpent,
+  }) {
+    final rows = db.select('SELECT * FROM runs WHERE id=?', [runId]);
+    if (rows.isEmpty) throw StateError('Unknown run');
+    final run = runFromRow(rows.single);
+    final data = {
+      ...run.data,
+      'workbench_assessment': runAssessment(
+        status: run.status,
+        result: result,
+        discriminating: discriminating,
+        reason: reason,
+        budgetSpent: budgetSpent,
+        at: DateTime.now(),
+      ),
+    };
+    db.execute('UPDATE runs SET data=? WHERE id=?', [jsonEncode(data), runId]);
+  }
+
   /// Starts a record for work the user chooses to perform in another tool.
   /// Task commands are data and are never launched by this method.
   ResearchRun startManualRun(ResearchTask task) {
@@ -315,6 +342,7 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     }
     final logs = List<String>.from(old.data['logs'] as List? ?? []);
     if (log.trim().isNotEmpty) logs.add(log.trim());
+    const finished = {'completed', 'failed'};
     final data = <String, dynamic>{
       ...old.data,
       'status': status,
@@ -322,6 +350,13 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
       'logs': logs,
       'conclusion': conclusion.trim(),
     };
+    // A changed outcome invalidates the earlier research judgment.
+    if (status != old.status) data.remove('workbench_assessment');
+    if (!finished.contains(status)) {
+      data.remove('finishedAt');
+    } else if (!finished.contains(old.status)) {
+      data['finishedAt'] = DateTime.now().toUtc().toIso8601String();
+    }
     db.execute('UPDATE runs SET status=?,data=? WHERE id=?', [
       status,
       jsonEncode(data),

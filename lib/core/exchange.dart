@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'research_kinds.dart';
+import 'skill_bridge.dart';
 import 'store.dart';
 
 class ResearchExchange {
@@ -435,6 +436,7 @@ class ResearchExchange {
       'taskId': task.id,
       'taskRevision': task.revision,
       'status': 'completed',
+      'finishedAt': '',
       'metrics': <String, dynamic>{},
       'logs': <String>[],
       'artifacts': <String>[],
@@ -447,7 +449,7 @@ class ResearchExchange {
           const JsonEncoder.withIndent('  ').convert(result),
         ),
         'README.md': utf8.encode(
-          '# ${task.title}\n\n${task.goal}\n\nTask ${task.id}, revision ${task.revision}.\n\nThis package is a specification only. No command runs automatically. Code and data references must be acquired and verified separately.\n\nExecute manually in an approved environment, complete result-template.json, and return it (or a ZIP containing result.json and relative artifacts). Status is a reported execution status, not scientific validation.\n',
+          '# ${task.title}\n\n${task.goal}\n\nTask ${task.id}, revision ${task.revision}.\n\nThis package is a specification only. No command runs automatically. Code and data references must be acquired and verified separately.\n\nExecute manually in an approved environment, complete result-template.json (set finishedAt to the ISO-8601 UTC time the run ended), and return it (or a ZIP containing result.json and relative artifacts). Status is a reported execution status, not scientific validation.\n',
         ),
       },
       destinationDirectory,
@@ -494,6 +496,8 @@ class ResearchExchange {
       'metrics': current.data['metrics'] ?? <String, dynamic>{},
       'logs': current.data['logs'] ?? <String>[],
       'conclusion': current.data['conclusion'] ?? '',
+      if (current.data['finishedAt'] != null)
+        'finishedAt': current.data['finishedAt'],
       'artifacts': artifacts,
     };
     files['result.json'] = utf8.encode(
@@ -518,6 +522,27 @@ class ResearchExchange {
       destinationDirectory,
       'result-${current.id}-${const Uuid().v4()}.zip',
     );
+  }
+
+  /// Writes an assessed run as one research-workflow `experiments` JSONL
+  /// line, to append to the skill project's `research/experiments.jsonl`.
+  Future<String> exportSkillExperiment(
+    ResearchRun run,
+    String destinationDirectory,
+  ) async {
+    final task = store.taskRevision(run.taskId, run.taskRevision);
+    if (task == null) throw StateError('Unknown task revision');
+    final record = executedExperiment(
+      task: task,
+      run: run,
+      now: DateTime.now(),
+    );
+    await Directory(destinationDirectory).create(recursive: true);
+    final file = File(
+      p.join(destinationDirectory, 'experiments-${record['id']}.jsonl'),
+    );
+    await file.writeAsString('${jsonEncode(record)}\n', flush: true);
+    return file.path;
   }
 
   Future<ResearchRun> importResult(String jsonOrZipPath) async {

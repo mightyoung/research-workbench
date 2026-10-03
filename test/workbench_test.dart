@@ -430,6 +430,63 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a planned experiment becomes a task, run and assessed result', (
+    tester,
+  ) async {
+    final source = Directory(p.join(temp.path, 'plan'))..createSync();
+    await tester.runAsync(() async {
+      File(p.join(source.path, 'experiments.jsonl')).writeAsStringSync(
+        '${jsonEncode({'id': 'e1', 'rev': 1, 'phase': 'planned', 'title': 'Rework probe', 'strongest_rival': 'past completion leaks'})}\n',
+      );
+      await ResearchExchange(store).importResearch(source.path);
+    });
+    tester.view.physicalSize = const Size(1280, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('实验'));
+    await settle(tester);
+    await tester.tap(find.text('Rework probe'));
+    await settle(tester);
+    await tester.tap(find.text('生成实验任务'));
+    await settle(tester);
+    expect(find.text('来源实验计划：e1 · r1'), findsOneWidget);
+    await tester.tap(find.text('开始执行记录'));
+    await settle(tester);
+    await tester.tap(find.text('确认'));
+    await settle(tester);
+    final run = store.runs(store.projects().first.id).single;
+    store.updateManualRun(
+      run.id,
+      status: 'completed',
+      metrics: {'accuracy': 0.6},
+      log: '',
+      conclusion: '',
+    );
+    await tester.tap(find.text('运行结果'));
+    await settle(tester);
+    await tester.tap(find.text('评估研究结论'));
+    await settle(tester);
+    await tester.tap(find.text('无定论'));
+    await settle(tester);
+    await tester.tap(find.text('支持').last);
+    await settle(tester);
+    await tester.tap(find.text('结果能区分自身解释与最强对手解释'));
+    await tester.enterText(field('判断理由'), 'drop only after rework');
+    await tester.enterText(field('实际花费（按计划预算单位，写回 skill 时必填）'), '1');
+    await tester.tap(find.text('保存评估'));
+    await settle(tester);
+    expect(find.textContaining('研究结论：支持 · 能区分竞争解释'), findsOneWidget);
+    expect(find.text('导出给 research-workflow'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
     await settle(tester);
