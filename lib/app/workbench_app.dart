@@ -16,6 +16,7 @@ import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
+import 'case_views.dart';
 import 'skill_panels.dart';
 import 'outline_link_dialog.dart';
 import 'run_assessment_dialog.dart';
@@ -304,6 +305,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     return true;
   }
 
+  Future<void> openCaseRecords() async {
+    final current = project;
+    if (current == null) return;
+    final cases = store.casesFor(current.id);
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CaseViews(
+          store: store,
+          projectId: current.id,
+          caseId: cases.isEmpty ? null : cases.first.id,
+        ),
+      ),
+    );
+    if (mounted) refresh();
+  }
+
   Future<void> openLan() async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -585,7 +602,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             ),
           ],
         ),
-        trailing: TextButton(onPressed: editProject, child: const Text('编辑目标')),
+        trailing: Wrap(
+          spacing: 4,
+          children: [
+            TextButton(onPressed: openCaseRecords, child: const Text('研究记录')),
+            TextButton(onPressed: editProject, child: const Text('编辑目标')),
+          ],
+        ),
       ),
       card(
         '下一步',
