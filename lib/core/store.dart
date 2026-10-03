@@ -391,8 +391,13 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
       'logs': logs,
       'conclusion': conclusion.trim(),
     };
-    // A changed outcome invalidates the earlier research judgment.
-    if (status != old.status) data.remove('workbench_assessment');
+    // A changed outcome invalidates the earlier research judgment; appending
+    // log lines does not.
+    if (status != old.status ||
+        jsonEncode(metrics) != jsonEncode(old.data['metrics'] ?? {}) ||
+        conclusion.trim() != (old.data['conclusion'] ?? '')) {
+      data.remove('workbench_assessment');
+    }
     if (!finished.contains(status)) {
       data.remove('finishedAt');
     } else if (!finished.contains(old.status)) {

@@ -132,6 +132,104 @@ void main() {
     expect(actual['executed_at'], assessed.data['finishedAt']);
   });
 
+  test('editing outcome data drops the earlier assessment', () {
+    final task = store.saveTask(
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      spec: {},
+    );
+    final run = store.startManualRun(task);
+    void update(Map<String, dynamic> metrics, String conclusion) =>
+        store.updateManualRun(
+          run.id,
+          status: 'completed',
+          metrics: metrics,
+          log: 'more log',
+          conclusion: conclusion,
+        );
+    void assess() => store.assessRun(
+      run.id,
+      result: 'inconclusive',
+      discriminating: false,
+      reason: 'r',
+    );
+    Object? assessment() => store.runs('p').single.data['workbench_assessment'];
+    update({'x': 1}, 'c');
+    assess();
+    update({'x': 1}, 'c');
+    expect(assessment(), isNotNull, reason: 'log-only edits keep it');
+    update({'x': 2}, 'c');
+    expect(assessment(), isNull);
+    assess();
+    update({'x': 2}, 'changed');
+    expect(assessment(), isNull);
+  });
+
+  test('export revalidates stored assessments and finish time', () {
+    final task = ResearchTask(
+      id: 't',
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      revision: 1,
+      spec: taskFromExperiment(plan).spec,
+    );
+    Map<String, dynamic> record(
+      String status,
+      Map<String, dynamic> assessment, {
+      String finishedAt = '2026-10-03T08:00:00Z',
+    }) => executedExperiment(
+      task: task,
+      run: ResearchRun(
+        id: 'run',
+        taskId: 't',
+        status: status,
+        taskRevision: 1,
+        accepted: false,
+        data: {
+          'metrics': {'x': 1},
+          'finishedAt': finishedAt,
+          'workbench_assessment': assessment,
+        },
+      ),
+      now: DateTime.utc(2026, 10, 3),
+    );
+    const ok = {
+      'result': 'supporting',
+      'discriminating': true,
+      'reason': 'r',
+      'budget_spent': 1,
+    };
+    expect(record('completed', ok)['actual']['result'], 'supporting');
+    for (final (status, bad) in [
+      ('failed', ok),
+      ('completed', {...ok, 'discriminating': false}),
+      ('completed', {...ok, 'budget_spent': -1}),
+      ('completed', {...ok, 'reason': ''}),
+      ('completed', {...ok, 'discriminating': 'yes'}),
+      ('completed', {...ok, 'result': 7}),
+    ]) {
+      expect(() => record(status, bad), throwsFormatException);
+    }
+    for (final time in [
+      'yesterday',
+      '2026-10-03T08:00:00',
+      '2026-13-40T00:00Z',
+    ]) {
+      expect(
+        () => record('completed', ok, finishedAt: time),
+        throwsFormatException,
+      );
+    }
+    final withOffset = record(
+      'completed',
+      ok,
+      finishedAt: '2026-10-03T16:00:00+08:00',
+    );
+    expect(withOffset['actual']['executed_at'], '2026-10-03T16:00:00+08:00');
+  });
+
   test(
     'export refuses runs that cannot form a valid executed record',
     () async {

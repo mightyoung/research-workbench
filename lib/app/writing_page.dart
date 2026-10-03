@@ -248,14 +248,18 @@ class _WritingPageState extends State<WritingPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6, right: 10),
+                      child: Text(
+                        section.heading,
+                        style: theme.textTheme.titleMedium,
+                      ),
+                    ),
+                    // Wraps on narrow phones instead of overflowing.
+                    Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 4,
                       children: [
-                        Expanded(
-                          child: Text(
-                            section.heading,
-                            style: theme.textTheme.titleMedium,
-                          ),
-                        ),
                         Chip(label: Text(sectionSupport[section.support]!)),
                         IconButton(
                           tooltip: '上移',

@@ -86,6 +86,13 @@ void main() {
       support: 'partial',
     );
     expect(
+      store
+          .outline(projectId)
+          .where((r) => r['section_id'] == findings.id)
+          .map((r) => r['heading']),
+      everyElement('Key findings'),
+    );
+    expect(
       () => store.updateSection(
         findings.id,
         heading: 'x',
