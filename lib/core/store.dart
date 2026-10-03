@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
       .toList();
   List<ResearchDocument> documents(String projectId) => db
       .select(
-        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path',
+        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path,rowid',
         [projectId],
       )
       .map(

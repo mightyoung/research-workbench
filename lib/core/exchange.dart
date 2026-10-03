@@ -129,6 +129,10 @@ class ResearchExchange {
   /// Finds whether a local record is cited as evidence (`?1` = local ID).
   static const _citedSql = 'SELECT 1 FROM outline WHERE evidence_id=?1';
 
+  static Future<bool> _sameBytes(String a, String b) async =>
+      sha256.convert(await File(a).readAsBytes()) ==
+      sha256.convert(await File(b).readAsBytes());
+
   /// Key-order-independent JSON, for comparing record content.
   static String _canonical(Object? value) => jsonEncode(switch (value) {
     Map m => {
@@ -138,6 +142,15 @@ class ResearchExchange {
     List l => [for (final v in l) jsonDecode(_canonical(v))],
     _ => value,
   });
+
+  /// Kinds that older versions imported as `other`.
+  static const _newlyRecognised = {
+    'sources',
+    'searches',
+    'tensions',
+    'failures',
+    'handoffs',
+  };
 
   /// Identifies a source record across re-imports: `id`+`rev` when present,
   /// otherwise the record content.
@@ -173,7 +186,9 @@ class ResearchExchange {
       oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
       oldData[e.id] = e.data;
     }
-    final oldDocs = {for (final d in store.documents(id)) d.relativePath: d.id};
+    // Newest version per path; older versions kept for their notes stay put.
+    final oldDocs = {for (final d in store.documents(id)) d.relativePath: d};
+    final seen = <String, String>{};
     store.db.execute('BEGIN');
     try {
       final manifest = File(p.join(snapshot.path, 'manifest.json'));
@@ -202,11 +217,19 @@ class ResearchExchange {
         final ext = p.extension(relative).toLowerCase();
         if (['.md', '.markdown', '.pdf'].contains(ext)) found++;
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
-          final docId = oldDocs.remove(relative);
-          if (docId != null) {
+          final old = oldDocs.remove(relative);
+          // Notes cite a page and quote of the bytes they were written on;
+          // a changed file with notes becomes a new version beside the old.
+          final keepOld =
+              old != null &&
+              store.db.select('SELECT 1 FROM notes WHERE document_id=?', [
+                old.id,
+              ]).isNotEmpty &&
+              !await _sameBytes(old.absolutePath, entity.path);
+          if (old != null && !keepOld) {
             store.db.execute(
               'UPDATE documents SET snapshot_path=? WHERE id=?',
-              [store.storedPath(entity.path), docId],
+              [store.storedPath(entity.path), old.id],
             );
           } else {
             store.db.execute('INSERT INTO documents VALUES(?,?,?,?)', [
@@ -247,14 +270,25 @@ class ResearchExchange {
                     .toString();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
             found++;
-            // Older imports stored kinds now recognised as `other`; reuse
-            // those rows so their local IDs and links survive.
-            final reuse = [_entryKey(kind, data), _entryKey('other', data)]
-                .map((k) => oldEntries[k])
-                .firstWhere(
-                  (ids) => ids != null && ids.isNotEmpty,
-                  orElse: () => null,
+            final key = _entryKey(kind, data);
+            if (seen[key] case final earlier?) {
+              if (earlier != _canonical(data)) {
+                throw FormatException(
+                  '$relative 中 ${data['id']} 修订 ${data['rev']} 出现多次且内容不同',
                 );
+              }
+              continue; // An identical repeated line adds nothing.
+            }
+            seen[key] = _canonical(data);
+            // Older imports stored the newly recognised kinds as `other`;
+            // reuse such a row (only when unambiguous) so its local ID and
+            // links survive reclassification.
+            final legacy = _newlyRecognised.contains(kind)
+                ? oldEntries[_entryKey('other', data)]
+                : null;
+            final reuse = (oldEntries[key]?.isNotEmpty ?? false)
+                ? oldEntries[key]
+                : (legacy != null && legacy.length == 1 ? legacy : null);
             if (reuse != null) {
               final localId = reuse.removeAt(0);
               // A revision is immutable once cited: silently rewriting it
@@ -291,10 +325,10 @@ class ResearchExchange {
           [entryId],
         );
       }
-      for (final docId in oldDocs.values) {
+      for (final doc in oldDocs.values) {
         store.db.execute(
           'DELETE FROM documents WHERE id=? AND id NOT IN (SELECT document_id FROM notes)',
-          [docId],
+          [doc.id],
         );
       }
       store.db.execute('COMMIT');
