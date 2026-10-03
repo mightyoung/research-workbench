@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
+import 'research_skill.dart';
 import 'store.dart';
 
 class ResearchExchange {
@@ -28,7 +29,17 @@ class ResearchExchange {
     return result;
   }
 
-  Future<Directory> _snapshot(String input, String group) async {
+  /// Files skipped by the last research import (count, bytes).
+  (int, int) lastSkipped = (0, 0);
+
+  /// [exclude] receives every candidate name and returns names to skip; the
+  /// size limits count only what is kept.
+  Future<Directory> _snapshot(
+    String input,
+    String group, {
+    Set<String> Function(List<String> names)? exclude,
+  }) async {
+    lastSkipped = (0, 0);
     final dest = Directory(
       p.join(store.rootPath, 'snapshots', group, const Uuid().v4()),
     );
@@ -58,6 +69,7 @@ class ResearchExchange {
         throw const FormatException('Symbolic links are not imported');
       }
       if (type == FileSystemEntityType.directory) {
+        final files = <String>[];
         await for (final item in Directory(
           input,
         ).list(recursive: true, followLinks: false)) {
@@ -68,15 +80,23 @@ class ResearchExchange {
           if (kind == FileSystemEntityType.link) {
             throw const FormatException('Symbolic links are not imported');
           }
-          if (kind == FileSystemEntityType.file) {
-            if (await File(item.path).length() > maxFileBytes) {
-              throw const FormatException('File exceeds 30 MiB');
-            }
-            await write(
-              p.relative(item.path, from: input),
-              await File(item.path).readAsBytes(),
-            );
+          if (kind == FileSystemEntityType.file) files.add(item.path);
+        }
+        final names = [
+          for (final f in files)
+            p.posix.joinAll(p.split(p.relative(f, from: input))),
+        ];
+        final skip = exclude?.call(names) ?? const <String>{};
+        for (var i = 0; i < files.length; i++) {
+          final length = await File(files[i]).length();
+          if (skip.contains(names[i])) {
+            lastSkipped = (lastSkipped.$1 + 1, lastSkipped.$2 + length);
+            continue;
           }
+          if (length > maxFileBytes) {
+            throw const FormatException('File exceeds 30 MiB');
+          }
+          await write(names[i], await File(files[i]).readAsBytes());
         }
       } else if (type == FileSystemEntityType.file &&
           input.toLowerCase().endsWith('.zip')) {
@@ -89,12 +109,20 @@ class ResearchExchange {
         );
         // Validate declared expanded sizes before requesting decompressed contents.
         var declared = 0, files = 0;
+        final skip =
+            exclude?.call([
+              for (final e in archive)
+                if (e.isFile) e.name,
+            ]) ??
+            const <String>{};
         for (final entry in archive) {
           _safe(entry.name);
           if (entry.isSymbolicLink) {
             throw const FormatException('Symbolic links are not imported');
           }
-          if (entry.isFile) {
+          if (entry.isFile && skip.contains(entry.name)) {
+            lastSkipped = (lastSkipped.$1 + 1, lastSkipped.$2 + entry.size);
+          } else if (entry.isFile) {
             declared += entry.size;
             files++;
             if (entry.size > maxFileBytes ||
@@ -105,7 +133,7 @@ class ResearchExchange {
           }
         }
         for (final entry in archive) {
-          if (entry.isFile) {
+          if (entry.isFile && !skip.contains(entry.name)) {
             await write(entry.name, entry.content as List<int>);
           }
         }
@@ -125,44 +153,67 @@ class ResearchExchange {
   }
 
   Future<ResearchProject> importResearch(String directoryOrZipPath) async {
-    final snapshot = await _snapshot(directoryOrZipPath, 'research');
+    String? root;
+    final snapshot = await _snapshot(
+      directoryOrZipPath,
+      'research',
+      exclude: (names) {
+        final detected = root = detectSkillRoot(names);
+        return detected == null
+            ? <String>{}
+            : {
+                for (final n in names)
+                  if (skipSkillPath(n, detected)) n,
+              };
+      },
+    );
     final id = const Uuid().v4();
     final title = p
         .basename(directoryOrZipPath)
         .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
     store.db.execute('BEGIN');
     try {
-      store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-        id,
-        title,
-        '',
-        '',
-      ]);
+      store.db.execute(
+        'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+        [id, title, '', ''],
+      );
+      // research-skill bookkeeping, keyed by project-relative POSIX path.
+      final documents = <String, (String, String)>{};
+      final manifests = <String, Map<String, dynamic>>{};
+      final logs = <ResearchEntry>[];
+      var v2 = false;
       await for (final entity in snapshot.list(recursive: true)) {
         if (entity is! File) {
           continue;
         }
         final relative = p.relative(entity.path, from: snapshot.path);
+        final posix = p.posix.joinAll(p.split(relative));
+        final projectPath = root != null && posix.startsWith(root!)
+            ? posix.substring(root!.length)
+            : null;
         final ext = p.extension(relative).toLowerCase();
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
-          store.db.execute('INSERT INTO documents VALUES(?,?,?,?)', [
-            const Uuid().v4(),
-            id,
-            relative,
-            store.storedPath(entity.path),
-          ]);
+          final documentId = const Uuid().v4();
+          final hash = sha256.convert(await entity.readAsBytes()).toString();
+          store.db.execute(
+            'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256) VALUES(?,?,?,?,?)',
+            [documentId, id, relative, store.storedPath(entity.path), hash],
+          );
+          if (projectPath != null) documents[projectPath] = (documentId, hash);
+        }
+        if (projectPath != null && _isArxivManifest(projectPath)) {
+          try {
+            manifests[projectPath] = WorkbenchStore.decode(
+              await entity.readAsString(),
+            );
+          } on FormatException {
+            // Unreadable manifests simply provide no binding.
+          }
         }
         if (ext == '.jsonl') {
           final base = p.basenameWithoutExtension(relative);
-          final kind =
-              [
-                'papers',
-                'claims',
-                'opportunities',
-                'experiments',
-              ].contains(base)
-              ? base
-              : 'other';
+          final kind = skillKinds.contains(base) ? base : 'other';
+          final isLog = projectPath == 'research/$base.jsonl';
           var line = 0;
           for (final text in const LineSplitter().convert(
             await entity.readAsString(),
@@ -180,28 +231,174 @@ class ResearchExchange {
                 (data['title'] ??
                         data['claim'] ??
                         data['statement'] ??
+                        data['observation'] ??
+                        data['query'] ??
+                        data['step'] ??
                         data['name'] ??
                         data['id'] ??
                         '$base:$line')
                     .toString();
+            final entryId = const Uuid().v4();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
             store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
-              const Uuid().v4(),
+              entryId,
               id,
               kind,
               recordTitle,
               jsonEncode(data),
             ]);
+            if (isLog && kind != 'other') {
+              logs.add(
+                ResearchEntry(
+                  id: entryId,
+                  projectId: id,
+                  kind: kind,
+                  title: recordTitle,
+                  data: data,
+                ),
+              );
+              v2 = v2 || data['schema_version'] == 2;
+            }
           }
         }
       }
+      var layout = 'generic';
+      if (root != null) {
+        layout = v2 ? 'research-skill-v2' : 'research-skill-v1';
+        store.db.execute(
+          'UPDATE projects SET layout=?,skill_root=? WHERE id=?',
+          [layout, root, id],
+        );
+        if (v2) {
+          computeBindings(
+            entries: logs,
+            documents: documents,
+            manifests: manifests,
+          ).forEach(store.insertBinding);
+        }
+      }
       store.db.execute('COMMIT');
-      return ResearchProject(id: id, title: title);
+      return ResearchProject(
+        id: id,
+        title: title,
+        layout: layout,
+        skillRoot: root ?? '',
+      );
     } catch (_) {
       store.db.execute('ROLLBACK');
       await snapshot.delete(recursive: true);
       rethrow;
     }
+  }
+
+  // related_work/<slug>/versions/<vN>/manifest.json written by fetch-paper.sh.
+  static bool _isArxivManifest(String path) {
+    final parts = path.split('/');
+    return parts.length == 5 &&
+        parts[0] == 'related_work' &&
+        parts[2] == 'versions' &&
+        parts[4] == 'manifest.json';
+  }
+
+  /// Writes research-skill V2 claim drafts for [noteIds] (design §7). Drafts
+  /// are never appended to the project logs by the workbench.
+  Future<ClaimDraftExport> exportClaimDrafts(
+    String projectId,
+    Iterable<String> noteIds,
+    String destinationDirectory, {
+    DateTime? now,
+  }) async {
+    final project = store.projects().firstWhere((e) => e.id == projectId);
+    if (!project.isSkill) {
+      throw StateError('Only research-skill projects support claim drafts');
+    }
+    final at = now ?? DateTime.now();
+    final docs = store.documents(projectId);
+    final notes = {
+      for (final d in docs)
+        for (final n in store.notes(d.id)) n.id: (d, n),
+    };
+    final bindings = store.bindings(projectId);
+    final papers = store.entries(projectId, kind: 'papers');
+    final rows = <Map<String, dynamic>>[];
+    final skipped = <(String, String)>[];
+    final ids = <String>{};
+    for (final noteId in noteIds) {
+      final found = notes[noteId];
+      if (found == null) {
+        skipped.add((noteId, '笔记不存在'));
+        continue;
+      }
+      final (doc, note) = found;
+      final candidates = bindings.where((b) => b.documentId == doc.id).toList();
+      final binding = candidates.where((b) => !b.ambiguous).firstOrNull;
+      if (binding == null) {
+        skipped.add((
+          noteId,
+          candidates.isEmpty ? '文档未绑定论文' : '文档有多个候选论文，需先确认绑定',
+        ));
+        continue;
+      }
+      final paper = papers
+          .where(
+            (e) =>
+                sourceIdOf(e) == binding.paperId &&
+                revOf(e) == binding.paperRev,
+          )
+          .firstOrNull;
+      if (paper == null) {
+        skipped.add((noteId, '绑定的论文修订未导入'));
+        continue;
+      }
+      String? text;
+      if (!doc.isPdf) {
+        try {
+          text = stripBom(
+            utf8.decode(await File(doc.absolutePath).readAsBytes()),
+          );
+        } on FormatException {
+          text = null;
+        }
+      }
+      String draftId;
+      do {
+        draftId = 'c-wb-${const Uuid().v4().substring(0, 8)}';
+      } while (!ids.add(draftId));
+      rows.add(
+        claimDraft(
+          DraftSource(
+            note: note,
+            document: doc,
+            projectPath: p.posix
+                .joinAll(p.split(doc.relativePath))
+                .substring(project.skillRoot.length),
+            binding: binding,
+            paper: paper,
+            text: text,
+          ),
+          id: draftId,
+          now: at,
+        ),
+      );
+    }
+    if (rows.isEmpty) {
+      throw StateError(
+        '没有可导出的笔记：${skipped.map((s) => s.$2).toSet().join('；')}',
+      );
+    }
+    await Directory(destinationDirectory).create(recursive: true);
+    final stamp = at.toUtc().toIso8601String().replaceAll(
+      RegExp(r'[-:]|\.\d+'),
+      '',
+    );
+    final file = File(
+      p.join(destinationDirectory, 'workbench-claims-$stamp.jsonl'),
+    );
+    if (await file.exists()) {
+      throw StateError('Destination already exists: ${file.path}');
+    }
+    await file.writeAsString(encodeJsonl(rows), flush: true);
+    return ClaimDraftExport(path: file.path, rows: rows, skipped: skipped);
   }
 
   Future<String> _zip(
@@ -311,12 +508,10 @@ class ResearchExchange {
         if (store.db.select('SELECT id FROM projects WHERE id=?', [
           projectId,
         ]).isEmpty) {
-          store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-            projectId,
-            '接收任务 · $title',
-            goal,
-            '确认环境后由用户手动开始执行记录',
-          ]);
+          store.db.execute(
+            'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+            [projectId, '接收任务 · $title', goal, '确认环境后由用户手动开始执行记录'],
+          );
         }
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?)', [
           id,
@@ -587,8 +782,10 @@ class ResearchExchange {
       final evidence = item['evidence_id'];
       if (entries.containsKey(evidence)) {
         final entry = entries[evidence]!;
+        // research-skill refs let check-research.py verify freshness.
+        final ref = skillRef(entry);
         out.writeln(
-          '${entry.title}\n\n来源记录：$evidence\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
+          '${entry.title}\n\n来源记录：${ref == null ? '' : '$ref '}$evidence\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
         );
       } else if (accepted.containsKey(evidence)) {
         final run = accepted[evidence]!;
@@ -626,4 +823,24 @@ class ResearchExchange {
     await file.writeAsString(out.toString(), flush: true);
     return file.path;
   }
+}
+
+/// Result of [ResearchExchange.exportClaimDrafts].
+class ClaimDraftExport {
+  const ClaimDraftExport({
+    required this.path,
+    required this.rows,
+    required this.skipped,
+  });
+  final String path;
+  final List<Map<String, dynamic>> rows;
+
+  /// (note id, reason) for notes that could not become drafts.
+  final List<(String, String)> skipped;
+  int get hashMismatches => rows
+      .where((r) => (r['workbench'] as Map)['hash_mismatch'] == true)
+      .length;
+  Set<String> get missingFields => {
+    for (final r in rows) ...missingDraftFields(r),
+  };
 }

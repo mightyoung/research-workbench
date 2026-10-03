@@ -15,12 +15,10 @@ void main() {
       store.close();
       temp.deleteSync(recursive: true);
     });
-    store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-      'project',
-      'Comparison',
-      '',
-      '',
-    ]);
+    store.db.execute(
+      'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+      ['project', 'Comparison', '', ''],
+    );
     final task = store.saveTask(
       projectId: 'project',
       title: 'Repeat measurement',

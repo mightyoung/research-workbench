@@ -4,8 +4,17 @@ class ResearchProject {
     required this.title,
     this.question = '',
     this.nextStep = '',
+    this.layout = 'generic',
+    this.skillRoot = '',
   });
   final String id, title, question, nextStep;
+
+  /// generic, research-skill-v1 or research-skill-v2.
+  final String layout;
+
+  /// Snapshot-relative prefix of the research-skill project root.
+  final String skillRoot;
+  bool get isSkill => layout.startsWith('research-skill');
 }
 
 class ResearchEntry {
@@ -26,8 +35,10 @@ class ResearchDocument {
     required this.projectId,
     required this.relativePath,
     required this.absolutePath,
+    this.sha256,
   });
   final String id, projectId, relativePath, absolutePath;
+  final String? sha256;
   String get title => relativePath.split('/').last;
   bool get isPdf => relativePath.toLowerCase().endsWith('.pdf');
 }
@@ -69,8 +80,27 @@ class ReadingNote {
     required this.text,
     this.pageNumber,
     this.quote = '',
+    this.evidenceKind,
+    this.doesNotSupport = '',
   });
   final String id, documentId, locator, text;
   final int? pageNumber;
   final String quote;
+  final String? evidenceKind;
+  final String doesNotSupport;
+}
+
+/// Link between an imported document and a research-skill paper revision.
+class PaperBinding {
+  const PaperBinding({
+    required this.documentId,
+    required this.paperId,
+    required this.paperRev,
+    required this.method,
+    required this.hashOk,
+    this.ambiguous = false,
+  });
+  final String documentId, paperId, method;
+  final int paperRev;
+  final bool hashOk, ambiguous;
 }

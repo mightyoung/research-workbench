@@ -261,12 +261,10 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
   test(
     'result ZIP cannot leave result.json outside its hash manifest',
     () async {
-      store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-        'p',
-        'Project',
-        '',
-        '',
-      ]);
+      store.db.execute(
+        'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+        ['p', 'Project', '', ''],
+      );
       final task = store.saveTask(
         projectId: 'p',
         title: 'Task',
@@ -343,6 +341,6 @@ PRAGMA user_version=3;
     expect(note.text, 'Legacy note');
     expect(note.pageNumber, isNull);
     expect(note.quote, isEmpty);
-    expect(WorkbenchStore.schemaVersion, 4);
+    expect(WorkbenchStore.schemaVersion, 5);
   });
 }

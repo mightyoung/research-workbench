@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
+import 'research_skill.dart' show evidenceKinds;
 
 class WorkbenchStore {
   WorkbenchStore._(this.rootPath, this.db);
@@ -28,6 +29,15 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     ),
     (db) => db.execute(
       "ALTER TABLE notes ADD COLUMN page_number INTEGER; ALTER TABLE notes ADD COLUMN quoted_text TEXT NOT NULL DEFAULT '';",
+    ),
+    // v5: research-skill layout, document hashes and paper bindings.
+    (db) => db.execute(
+      '''ALTER TABLE projects ADD COLUMN layout TEXT NOT NULL DEFAULT 'generic';
+ALTER TABLE projects ADD COLUMN skill_root TEXT NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN sha256 TEXT;
+ALTER TABLE notes ADD COLUMN evidence_kind TEXT;
+ALTER TABLE notes ADD COLUMN does_not_support TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(id),paper_id TEXT,paper_rev INTEGER,method TEXT,hash_ok INTEGER,ambiguous INTEGER,PRIMARY KEY(document_id,paper_id));''',
     ),
   ];
   static int get schemaVersion => _migrations.length;
@@ -115,6 +125,8 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           title: r['title'],
           question: r['question'],
           nextStep: r['next_step'],
+          layout: r['layout'],
+          skillRoot: r['skill_root'],
         ),
       )
       .toList();
@@ -129,12 +141,13 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           projectId: r['project_id'],
           relativePath: r['relative_path'],
           absolutePath: resolvePath(r['snapshot_path']),
+          sha256: r['sha256'],
         ),
       )
       .toList();
   List<ResearchEntry> entries(String projectId, {String? kind}) => db
       .select(
-        'SELECT * FROM entries WHERE project_id=?${kind == null ? '' : ' AND kind=?'}',
+        'SELECT * FROM entries WHERE project_id=?${kind == null ? '' : ' AND kind=?'} ORDER BY rowid',
         [projectId, ?kind],
       )
       .map(
@@ -195,9 +208,57 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           text: r['text'],
           pageNumber: r['page_number'],
           quote: r['quoted_text'],
+          evidenceKind: r['evidence_kind'],
+          doesNotSupport: r['does_not_support'],
         ),
       )
       .toList();
+  List<PaperBinding> bindings(String projectId) => db
+      .select(
+        'SELECT b.* FROM paper_bindings b JOIN documents d ON d.id=b.document_id WHERE d.project_id=?',
+        [projectId],
+      )
+      .map(
+        (r) => PaperBinding(
+          documentId: r['document_id'],
+          paperId: r['paper_id'],
+          paperRev: r['paper_rev'],
+          method: r['method'],
+          hashOk: r['hash_ok'] == 1,
+          ambiguous: r['ambiguous'] == 1,
+        ),
+      )
+      .toList();
+  void insertBinding(PaperBinding b) =>
+      db.execute('INSERT OR REPLACE INTO paper_bindings VALUES(?,?,?,?,?,?)', [
+        b.documentId,
+        b.paperId,
+        b.paperRev,
+        b.method,
+        b.hashOk ? 1 : 0,
+        b.ambiguous ? 1 : 0,
+      ]);
+
+  /// Resolves an ambiguous match by the user's choice: competing candidates
+  /// for the same document or paper are dropped.
+  void confirmBinding(String documentId, String paperId) {
+    db.execute('BEGIN');
+    try {
+      db.execute(
+        'DELETE FROM paper_bindings WHERE (document_id=? OR paper_id=?) AND NOT (document_id=? AND paper_id=?) AND ambiguous=1',
+        [documentId, paperId, documentId, paperId],
+      );
+      db.execute(
+        "UPDATE paper_bindings SET ambiguous=0,method=method||'+manual' WHERE document_id=? AND paper_id=?",
+        [documentId, paperId],
+      );
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  }
+
   void saveProject(
     String id, {
     required String question,
@@ -213,13 +274,27 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     String text, {
     int? pageNumber,
     String quote = '',
+    String? evidenceKind,
+    String doesNotSupport = '',
   }) {
     if (pageNumber != null && pageNumber < 1) {
       throw const FormatException('Page number must be positive');
     }
+    if (evidenceKind != null && !evidenceKinds.contains(evidenceKind)) {
+      throw FormatException('Unsupported evidence kind: $evidenceKind');
+    }
     db.execute(
-      'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text) VALUES(?,?,?,?,?,?)',
-      [const Uuid().v4(), documentId, locator, text, pageNumber, quote.trim()],
+      'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text,evidence_kind,does_not_support) VALUES(?,?,?,?,?,?,?,?)',
+      [
+        const Uuid().v4(),
+        documentId,
+        locator,
+        text,
+        pageNumber,
+        quote.trim(),
+        evidenceKind,
+        doesNotSupport.trim(),
+      ],
     );
   }
 

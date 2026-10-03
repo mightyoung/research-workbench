@@ -8,9 +8,11 @@ import 'package:path/path.dart' as p;
 import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
+import '../core/research_skill.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import 'lan_transfer_page.dart';
+import 'skill_panels.dart';
 import 'theme.dart';
 
 class WorkbenchApp extends StatelessWidget {
@@ -68,6 +70,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   bool busy = false;
   String search = '';
   String entryKind = 'papers';
+  bool showRetired = false;
   String? lastExportPath;
   static const labels = ['概览', '文库与证据', '研究任务', '运行结果', '论文写作', '研究关系'];
   static const icons = [
@@ -147,10 +150,17 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       return;
     }
     await action(() async {
-      final p = await ResearchExchange(store).importResearch(path);
+      final exchange = ResearchExchange(store);
+      final p = await exchange.importResearch(path);
       projectId = p.id;
       section = 0;
-      message('已导入 ${p.title}');
+      final (files, bytes) = exchange.lastSkipped;
+      message(
+        p.isSkill
+            ? '已导入 research-skill 项目 ${p.title}'
+                  '${files == 0 ? '' : '；跳过 $files 个文件（${(bytes / 1048576).toStringAsFixed(1)} MiB：源码包、数据集、权重等）'}'
+            : '已导入 ${p.title}',
+      );
     });
   }
 
@@ -505,21 +515,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                Chip(
-                  label: Text(
-                    '${entries.where((e) => e.kind == 'papers').length} 篇文献',
-                  ),
-                ),
-                Chip(
-                  label: Text(
-                    '${entries.where((e) => e.kind == 'claims').length} 条主张',
-                  ),
-                ),
-                Chip(
-                  label: Text(
-                    '${entries.where((e) => e.kind == 'opportunities').length} 个候选',
-                  ),
-                ),
+                Chip(label: Text('${countKind(entries, 'papers')} 篇文献')),
+                Chip(label: Text('${countKind(entries, 'claims')} 条主张')),
+                Chip(label: Text('${countKind(entries, 'opportunities')} 个候选')),
                 Chip(label: Text('${store.tasks(p.id).length} 个任务')),
               ],
             ),
@@ -558,6 +556,27 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           ],
         ),
       ),
+      if (p.isSkill)
+        card(
+          '回写 research-skill',
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                p.layout == 'research-skill-v2'
+                    ? '已识别为 research-skill V2 项目。精读笔记可导出为待审 claim 草稿，补全后由 research-skill 追加并校验。'
+                    : '已识别为 research-skill V1 项目，仅支持阅读；论文绑定与回写需要 V2 记录。',
+              ),
+              const SizedBox(height: 12),
+              if (p.layout == 'research-skill-v2')
+                FilledButton.icon(
+                  onPressed: busy ? null : exportDrafts,
+                  icon: const Icon(Icons.outbox_outlined),
+                  label: const Text('导出回写草稿'),
+                ),
+            ],
+          ),
+        ),
       card(
         '从材料到论文',
         Wrap(
@@ -589,6 +608,26 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         ),
       ),
     ]);
+  }
+
+  /// Current, non-retired records for research-skill projects; raw rows otherwise.
+  int countKind(List<ResearchEntry> entries, String kind) {
+    final rows = entries.where((e) => e.kind == kind).toList();
+    return project!.isSkill
+        ? revisionGroups(rows).where((g) => !g.retired).length
+        : rows.length;
+  }
+
+  Future<void> exportDrafts() async {
+    final ids = await pickDraftNotes(context, store, project!.id);
+    if (ids == null || ids.isEmpty || !mounted) return;
+    await action(() async {
+      final result = await ResearchExchange(
+        store,
+      ).exportClaimDrafts(project!.id, ids, exportDirectory);
+      await saveGenerated(result.path, 'application/x-ndjson');
+      if (mounted) await showDraftSummary(context, result);
+    });
   }
 
   Future<void> editProject() async {
@@ -661,14 +700,19 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           (d) => d.relativePath.toLowerCase().contains(search.toLowerCase()),
         )
         .toList();
-    final entries = store
-        .entries(p.id, kind: entryKind)
-        .where(
-          (e) => '${e.title} ${jsonEncode(e.data)}'.toLowerCase().contains(
-            search.toLowerCase(),
-          ),
-        )
-        .toList();
+    // research-skill logs are append-only: show one current row per identity.
+    final rows = store.entries(p.id, kind: entryKind);
+    final groups =
+        (p.isSkill
+                ? revisionGroups(rows)
+                : rows.map((e) => RevisionGroup([e])).toList())
+            .where((g) => showRetired || !g.retired)
+            .where(
+              (g) => '${g.current.title} ${jsonEncode(g.current.data)}'
+                  .toLowerCase()
+                  .contains(search.toLowerCase()),
+            )
+            .toList();
     return layout([
       TextField(
         onChanged: (v) => setState(() => search = v),
@@ -690,24 +734,21 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         runSpacing: 8,
         children: [
           for (final kind in [
-            'papers',
-            'claims',
-            'opportunities',
-            'experiments',
+            ...skillKinds.where(
+              (k) => p.isSkill || skillKindLabels.keys.take(4).contains(k),
+            ),
             'documents',
           ])
             ChoiceChip(
-              label: Text(
-                {
-                  'papers': '论文',
-                  'claims': '主张',
-                  'opportunities': '候选',
-                  'experiments': '实验计划',
-                  'documents': '文件',
-                }[kind]!,
-              ),
+              label: Text(skillKindLabels[kind] ?? '文件'),
               selected: entryKind == kind,
               onSelected: (_) => setState(() => entryKind = kind),
+            ),
+          if (p.isSkill && entryKind != 'documents')
+            FilterChip(
+              label: const Text('显示已退役'),
+              selected: showRetired,
+              onSelected: (v) => setState(() => showRetired = v),
             ),
         ],
       ),
@@ -728,21 +769,24 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           ),
         )
       else
-        ...entries.map(
-          (e) => Card(
+        ...groups.map(
+          (g) => Card(
             child: ListTile(
-              title: Text(e.title),
+              title: Text(g.current.title),
               subtitle: Text(
-                entrySubtitle(e),
+                [
+                  if (p.isSkill) ...revisionBadges(g),
+                  entrySubtitle(g.current),
+                ].where((s) => s.isNotEmpty).join(' · '),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
               ),
               trailing: const Icon(Icons.chevron_right),
-              onTap: () => showEntry(e),
+              onTap: () => showEntry(g.current, group: p.isSkill ? g : null),
             ),
           ),
         ),
-      if ((entryKind == 'documents' ? docs : entries).isEmpty)
+      if ((entryKind == 'documents' ? docs : groups).isEmpty)
         const Text('此分类尚无记录。导入文件的原始快照已保留。'),
     ]);
   }
@@ -760,7 +804,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     ].where((v) => v != null).join(' · ');
   }
 
-  Future<void> showEntry(ResearchEntry e) async {
+  Future<void> showEntry(ResearchEntry e, {RevisionGroup? group}) async {
     final d = e.data;
     await showDialog<void>(
       context: context,
@@ -772,8 +816,30 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(entrySubtitle(e)),
+                Text(
+                  [
+                    if (group != null) ...revisionBadges(group),
+                    entrySubtitle(e),
+                  ].where((s) => s.isNotEmpty).join(' · '),
+                ),
                 const SizedBox(height: 12),
+                if (project!.isSkill && e.kind == 'papers') ...[
+                  PaperBindingSection(
+                    store: store,
+                    paper: e,
+                    onOpen: (doc) {
+                      Navigator.pop(context);
+                      openDocument(doc);
+                    },
+                    onConfirm: (b) {
+                      store.confirmBinding(b.documentId, b.paperId);
+                      Navigator.pop(context);
+                      refresh();
+                      message('已确认绑定');
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 if (d['statement'] != null) SelectableText('${d['statement']}'),
                 if (d['locator'] != null)
                   SelectableText(
@@ -790,6 +856,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                   const JsonEncoder.withIndent('  ').convert(d),
                   style: const TextStyle(fontSize: 12),
                 ),
+                if (group != null && group.older.isNotEmpty)
+                  RevisionHistory(older: group.older),
               ],
             ),
           ),
@@ -820,6 +888,16 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
 
   void findSource(ResearchEntry e) {
     final all = store.documents(project!.id);
+    final bound = store
+        .bindings(project!.id)
+        .where((b) => !b.ambiguous && b.paperId == sourceIdOf(e))
+        .map((b) => all.where((d) => d.id == b.documentId).firstOrNull)
+        .nonNulls
+        .firstOrNull;
+    if (e.kind == 'papers' && bound != null) {
+      openDocument(bound);
+      return;
+    }
     final slug = '${e.data['work_id'] ?? ''}';
     final matches = all
         .where((d) => slug.isNotEmpty && d.relativePath.contains('/$slug/'))

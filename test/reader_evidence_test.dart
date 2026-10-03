@@ -17,18 +17,14 @@ void main() {
       temp.deleteSync(recursive: true);
     });
     File(p.join(temp.path, 'paper.md')).writeAsStringSync('# Study');
-    store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-      'project',
-      'Study',
-      '',
-      '',
-    ]);
-    store.db.execute('INSERT INTO documents VALUES(?,?,?,?)', [
-      'document',
-      'project',
-      'paper.md',
-      'paper.md',
-    ]);
+    store.db.execute(
+      'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+      ['project', 'Study', '', ''],
+    );
+    store.db.execute(
+      'INSERT INTO documents(id,project_id,relative_path,snapshot_path) VALUES(?,?,?,?)',
+      ['document', 'project', 'paper.md', 'paper.md'],
+    );
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
