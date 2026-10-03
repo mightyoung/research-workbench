@@ -124,20 +124,49 @@ class ResearchExchange {
     }
   }
 
-  Future<ResearchProject> importResearch(String directoryOrZipPath) async {
+  /// Identifies a source record across re-imports: `id`+`rev` when present,
+  /// otherwise the record content.
+  static String _entryKey(String kind, Map<String, dynamic> data) =>
+      data['id'] != null
+      ? '$kind\u0000id:${data['id']}\u0000rev:${data['rev']}'
+      : '$kind\u0000sha:${sha256.convert(utf8.encode(jsonEncode(data)))}';
+
+  /// Imports a research snapshot. With [intoProjectId] the snapshot refreshes
+  /// that project: records and documents keep their local IDs so notes and
+  /// outline links survive; records gone from the source are dropped unless
+  /// the outline cites them, documents unless they carry notes.
+  Future<ResearchProject> importResearch(
+    String directoryOrZipPath, {
+    String? intoProjectId,
+  }) async {
+    final existing = intoProjectId == null
+        ? null
+        : store.projects().where((p) => p.id == intoProjectId).firstOrNull;
+    if (intoProjectId != null && existing == null) {
+      throw StateError('Unknown project');
+    }
     final snapshot = await _snapshot(directoryOrZipPath, 'research');
-    final id = const Uuid().v4();
-    final title = p
-        .basename(directoryOrZipPath)
-        .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final id = existing?.id ?? const Uuid().v4();
+    final title =
+        existing?.title ??
+        p
+            .basename(directoryOrZipPath)
+            .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final oldEntries = <String, List<String>>{};
+    for (final e in store.entries(id)) {
+      oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
+    }
+    final oldDocs = {for (final d in store.documents(id)) d.relativePath: d.id};
     store.db.execute('BEGIN');
     try {
-      store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-        id,
-        title,
-        '',
-        '',
-      ]);
+      if (existing == null) {
+        store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
+          id,
+          title,
+          '',
+          '',
+        ]);
+      }
       await for (final entity in snapshot.list(recursive: true)) {
         if (entity is! File) {
           continue;
@@ -145,12 +174,20 @@ class ResearchExchange {
         final relative = p.relative(entity.path, from: snapshot.path);
         final ext = p.extension(relative).toLowerCase();
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
-          store.db.execute('INSERT INTO documents VALUES(?,?,?,?)', [
-            const Uuid().v4(),
-            id,
-            relative,
-            store.storedPath(entity.path),
-          ]);
+          final docId = oldDocs.remove(relative);
+          if (docId != null) {
+            store.db.execute(
+              'UPDATE documents SET snapshot_path=? WHERE id=?',
+              [store.storedPath(entity.path), docId],
+            );
+          } else {
+            store.db.execute('INSERT INTO documents VALUES(?,?,?,?)', [
+              const Uuid().v4(),
+              id,
+              relative,
+              store.storedPath(entity.path),
+            ]);
+          }
         }
         if (ext == '.jsonl') {
           final base = p.basenameWithoutExtension(relative);
@@ -185,15 +222,36 @@ class ResearchExchange {
                         '$base:$line')
                     .toString();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
-            store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
-              const Uuid().v4(),
-              id,
-              kind,
-              recordTitle,
-              jsonEncode(data),
-            ]);
+            final reuse = oldEntries[_entryKey(kind, data)];
+            if (reuse != null && reuse.isNotEmpty) {
+              store.db.execute('UPDATE entries SET title=?,data=? WHERE id=?', [
+                recordTitle,
+                jsonEncode(data),
+                reuse.removeAt(0),
+              ]);
+            } else {
+              store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
+                const Uuid().v4(),
+                id,
+                kind,
+                recordTitle,
+                jsonEncode(data),
+              ]);
+            }
           }
         }
+      }
+      for (final entryId in oldEntries.values.expand((ids) => ids)) {
+        store.db.execute(
+          'DELETE FROM entries WHERE id=? AND id NOT IN (SELECT evidence_id FROM outline)',
+          [entryId],
+        );
+      }
+      for (final docId in oldDocs.values) {
+        store.db.execute(
+          'DELETE FROM documents WHERE id=? AND id NOT IN (SELECT document_id FROM notes)',
+          [docId],
+        );
       }
       store.db.execute('COMMIT');
       return ResearchProject(id: id, title: title);

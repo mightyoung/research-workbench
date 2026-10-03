@@ -4,6 +4,7 @@ import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:research_workbench/core/exchange.dart';
+import 'package:research_workbench/core/models.dart';
 import 'package:research_workbench/core/store.dart';
 import 'package:sqlite3/sqlite3.dart';
 
@@ -322,6 +323,77 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     expect(report, contains('The final cohort included 42 participants.'));
     expect(report, contains(note.id as String));
   });
+
+  test(
+    're-import updates a project and keeps notes and outline links',
+    () async {
+      final source = Directory(p.join(temp.path, 'evolving'))..createSync();
+      final claims = File(p.join(source.path, 'claims.jsonl'));
+      String line(Map<String, dynamic> v) => '${jsonEncode(v)}\n';
+      claims.writeAsStringSync(
+        line({'id': 'c1', 'rev': 1, 'statement': 'first'}) +
+            line({'id': 'c9', 'rev': 1, 'statement': 'dropped later'}),
+      );
+      File(p.join(source.path, 'paper.md')).writeAsStringSync('# v1');
+      final project = await exchange.importResearch(source.path);
+      final doc = store.documents(project.id).single;
+      store.saveNote(doc.id, 'Intro', 'keep me');
+      final c1 = store
+          .entries(project.id)
+          .firstWhere((e) => e.data['id'] == 'c1');
+      store.addOutline(project.id, 'Claim', c1.id);
+      store.saveProject(project.id, question: 'Q', nextStep: 'N');
+
+      claims.writeAsStringSync(
+        line({'id': 'c1', 'rev': 1, 'statement': 'first'}) +
+            line({'id': 'c1', 'rev': 2, 'statement': 'revised'}),
+      );
+      File(p.join(source.path, 'paper.md')).writeAsStringSync('# v2');
+      File(p.join(source.path, 'new.md')).writeAsStringSync('# new');
+      final updated = await exchange.importResearch(
+        source.path,
+        intoProjectId: project.id,
+      );
+
+      expect(updated.id, project.id);
+      expect(store.projects(), hasLength(1));
+      expect(store.projects().single.question, 'Q');
+      final entries = store.entries(project.id);
+      expect(entries.map((e) => '${e.data['id']}@${e.data['rev']}').toSet(), {
+        'c1@1',
+        'c1@2',
+      });
+      expect(entries.any((e) => e.id == c1.id), isTrue);
+      final latest = latestRevisions(entries).single;
+      expect(latest.data['rev'], 2);
+      final docs = store.documents(project.id);
+      expect(docs.map((d) => d.relativePath).toSet(), {'paper.md', 'new.md'});
+      final paper = docs.firstWhere((d) => d.relativePath == 'paper.md');
+      expect(paper.id, doc.id);
+      expect(File(paper.absolutePath).readAsStringSync(), '# v2');
+      expect(store.notes(doc.id).single.text, 'keep me');
+      expect(store.outline(project.id).single['evidence_id'], c1.id);
+    },
+  );
+
+  test(
+    're-import keeps outline-referenced records that left the source',
+    () async {
+      final source = Directory(p.join(temp.path, 'shrinking'))..createSync();
+      final claims = File(p.join(source.path, 'claims.jsonl'))
+        ..writeAsStringSync('${jsonEncode({'title': 'no id'})}\n');
+      final project = await exchange.importResearch(source.path);
+      final entry = store.entries(project.id).single;
+      store.addOutline(project.id, 'Cited', entry.id);
+      claims.writeAsStringSync('');
+      await exchange.importResearch(source.path, intoProjectId: project.id);
+      expect(store.entries(project.id).single.id, entry.id);
+      await expectLater(
+        exchange.importResearch(source.path, intoProjectId: 'missing'),
+        throwsStateError,
+      );
+    },
+  );
 
   test('existing v3 reading notes gain empty page and quote fields', () {
     final root = p.join(temp.path, 'v3-notes');

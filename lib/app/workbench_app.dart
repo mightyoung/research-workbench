@@ -68,6 +68,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   bool busy = false;
   String search = '';
   String entryKind = 'papers';
+  bool showHistory = false;
   String? lastExportPath;
   static const labels = ['概览', '文库与证据', '研究任务', '运行结果', '论文写作', '研究关系'];
   static const icons = [
@@ -146,12 +147,46 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     )) {
       return;
     }
+    final target = await chooseImportTarget(path);
+    if (target == null) return;
     await action(() async {
-      final p = await ResearchExchange(store).importResearch(path);
+      final p = await ResearchExchange(
+        store,
+      ).importResearch(path, intoProjectId: target.isEmpty ? null : target);
       projectId = p.id;
       section = 0;
-      message('已导入 ${p.title}');
+      message(target.isEmpty ? '已导入 ${p.title}' : '已更新 ${p.title}，笔记与提纲保留');
     });
+  }
+
+  /// Returns a project ID to refresh, '' for a new project, or null to cancel.
+  Future<String?> chooseImportTarget(String path) async {
+    final name = p
+        .basename(path)
+        .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final projects = store.projects()
+      ..sort((a, b) => (b.title == name ? 1 : 0) - (a.title == name ? 1 : 0));
+    if (projects.isEmpty) return '';
+    return showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('导入到哪个项目？'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, ''),
+            child: Text('新建项目「$name」'),
+          ),
+          for (final project in projects)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, project.id),
+              child: Text(
+                '更新「${project.title}」${project.title == name ? ' · 同名' : ''}'
+                '\n保留笔记、任务、运行与提纲',
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   String get exportDirectory => p.join(store.rootPath, 'exports');
@@ -219,7 +254,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         });
       }
     } else if (kind == 'research') {
-      final project = await exchange.importResearch(path);
+      final target = await chooseImportTarget(path);
+      if (target == null) return;
+      final project = await exchange.importResearch(
+        path,
+        intoProjectId: target.isEmpty ? null : target,
+      );
       if (mounted) {
         setState(() {
           projectId = project.id;
@@ -483,7 +523,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   );
   Widget overview() {
     final p = project!;
-    final entries = store.entries(p.id);
+    final entries = latestRevisions(store.entries(p.id));
     final docs = store.documents(p.id);
     final readme = docs
         .where((d) => d.relativePath.toLowerCase() == 'readme.md')
@@ -661,8 +701,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           (d) => d.relativePath.toLowerCase().contains(search.toLowerCase()),
         )
         .toList();
-    final entries = store
-        .entries(p.id, kind: entryKind)
+    final allEntries = store.entries(p.id, kind: entryKind);
+    final latest = latestRevisions(allEntries);
+    final hidden = allEntries.length - latest.length;
+    final entries = (showHistory ? allEntries : latest)
         .where(
           (e) => '${e.title} ${jsonEncode(e.data)}'.toLowerCase().contains(
             search.toLowerCase(),
@@ -709,6 +751,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               selected: entryKind == kind,
               onSelected: (_) => setState(() => entryKind = kind),
             ),
+          if (entryKind != 'documents' && hidden > 0)
+            FilterChip(
+              label: Text('显示 $hidden 个历史修订'),
+              selected: showHistory,
+              onSelected: (v) => setState(() => showHistory = v),
+            ),
         ],
       ),
       if (entryKind == 'documents')
@@ -750,6 +798,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   String entrySubtitle(ResearchEntry e) {
     final d = e.data;
     return [
+      if (d['rev'] != null) 'r${d['rev']}',
       d['year'],
       d['venue'],
       d['reading_depth'],

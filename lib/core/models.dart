@@ -74,3 +74,17 @@ class ReadingNote {
   final int? pageNumber;
   final String quote;
 }
+
+/// Keeps the highest `rev` of each source record `id`; records without an id
+/// stand alone. Input order is preserved.
+List<ResearchEntry> latestRevisions(List<ResearchEntry> entries) {
+  int rev(ResearchEntry e) => e.data['rev'] is int ? e.data['rev'] as int : 0;
+  String? key(ResearchEntry e) =>
+      e.data['id'] == null ? null : '${e.kind}\u0000${e.data['id']}';
+  final best = <String, ResearchEntry>{};
+  for (final e in entries) {
+    final k = key(e);
+    if (k != null && (best[k] == null || rev(e) > rev(best[k]!))) best[k] = e;
+  }
+  return entries.where((e) => key(e) == null || best[key(e)] == e).toList();
+}

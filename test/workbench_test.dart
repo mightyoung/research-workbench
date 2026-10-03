@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -331,6 +332,61 @@ void main() {
     expect(find.text('导出结果包'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'ZIP re-import updates the same-name project and hides old revisions',
+    (tester) async {
+      final zip = File(p.join(temp.path, 'fixture.zip'));
+      await tester.runAsync(() async {
+        final claims = [
+          {'id': 'claim-1', 'title': 'Conditional evidence', 'rev': 2},
+          {'id': 'claim-1', 'title': 'Revised evidence', 'rev': 3},
+        ].map(jsonEncode).join('\n');
+        final archive = Archive()
+          ..addFile(ArchiveFile.string('claims.jsonl', claims));
+        zip.writeAsBytesSync(ZipEncoder().encode(archive));
+      });
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      await tester.pumpWidget(
+        WorkbenchApp(store: store, pickImportFile: (_) async => zip.path),
+      );
+      await settle(tester);
+      await tester.tap(find.byTooltip('导入材料'));
+      await settle(tester);
+      await tester.tap(find.text('导入研究 ZIP'));
+      await settle(tester);
+      await tester.tap(find.text('确认'));
+      await settle(tester);
+      await tester.tap(find.textContaining('更新「fixture」 · 同名'));
+      for (
+        var i = 0;
+        i < 50 && find.textContaining('已更新').evaluate().isEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () async => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      await settle(tester);
+      expect(store.projects(), hasLength(1));
+      await tester.tap(find.text('文库与证据'));
+      await settle(tester);
+      await tester.tap(find.text('主张'));
+      await settle(tester);
+      expect(find.text('Revised evidence'), findsOneWidget);
+      expect(find.text('Conditional evidence'), findsNothing);
+      await tester.tap(find.text('显示 1 个历史修订'));
+      await settle(tester);
+      expect(find.text('Conditional evidence'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
