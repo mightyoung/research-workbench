@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -5,6 +6,8 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:research_workbench/app/workbench_app.dart';
+import 'package:research_workbench/core/case_models.dart';
+import 'package:research_workbench/core/case_store.dart';
 import 'package:research_workbench/core/exchange.dart';
 import 'package:research_workbench/core/store.dart';
 
@@ -156,4 +159,128 @@ void main() {
     expect(find.text('普通记录'), findsOneWidget);
     expect(find.text('显示已退役'), findsNothing);
   });
+
+  testWidgets('v66 method hint stays separate from the review badge', (
+    tester,
+  ) async {
+    await _pumpDedicated(tester, temp, methodCommit: null, searches: true);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('候选'));
+    await settle(tester);
+    final subtitle = tester
+        .widget<Text>(find.textContaining('按当前方法待复核'))
+        .data!;
+    expect(subtitle.split(' · '), contains('按当前方法待复核'));
+    expect(subtitle.split(' · '), contains('继续'));
+    expect(subtitle.split(' · '), isNot(contains('待复核')));
+    await tester.tap(find.text('可行动候选'));
+    await settle(tester);
+    expect(find.textContaining('按当前方法待复核'), findsWidgets);
+    expect(find.textContaining('决定'), findsOneWidget);
+    await tester.tap(find.text('关闭'));
+    await settle(tester);
+
+    await tester.tap(find.text('检索记录'));
+    await settle(tester);
+    expect(find.textContaining('sparse attention'), findsOneWidget);
+    expect(find.textContaining('exploratory'), findsOneWidget);
+    expect(find.textContaining('discovery-yield 仅为提示'), findsOneWidget);
+    expect(find.text('待复核'), findsNothing);
+  });
+
+  testWidgets('v64 history does not add a method review hint', (tester) async {
+    await _pumpDedicated(
+      tester,
+      temp,
+      methodCommit: v64MethodCommit,
+      searches: false,
+    );
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('候选'));
+    await settle(tester);
+    expect(find.textContaining('继续'), findsWidgets);
+    expect(find.textContaining('按当前方法待复核'), findsNothing);
+  });
 }
+
+Future<void> _pumpDedicated(
+  WidgetTester tester,
+  Directory temp, {
+  required String? methodCommit,
+  required bool searches,
+}) async {
+  tester.view.physicalSize = const Size(1280, 900);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
+  final root = Directory(p.join(temp.path, 'dedicated-$methodCommit'));
+  final files = <String, String>{
+    'research/sources.jsonl': _log([
+      {'id': 's1', 'rev': 1, 'url': 'https://example.invalid/1'},
+    ]),
+    'research/papers.jsonl': _log([
+      {'id': 'p1', 'rev': 1, 'title': '论文', 'review_status': 'current'},
+    ]),
+    'research/claims.jsonl': _log([
+      {'id': 'c1', 'rev': 1, 'statement': '主张', 'review_status': 'current'},
+    ]),
+    'research/opportunities.jsonl': _log([
+      {
+        'id': 'o-go',
+        'rev': 1,
+        'title': '可行动候选',
+        'status': 'active',
+        'decision': 'continue',
+      },
+    ]),
+    if (searches)
+      'research/searches.jsonl': _log([
+        {
+          'id': 'q1',
+          'rev': 1,
+          'title': '检索',
+          'query': 'attention',
+          'subq': 'sparse attention',
+          'intent': 'exploratory',
+          'status': 'done',
+        },
+      ]),
+  };
+  files.forEach((rel, text) {
+    File(p.join(root.path, rel))
+      ..createSync(recursive: true)
+      ..writeAsStringSync(text);
+  });
+  final dedicated = WorkbenchStore.open(
+    p.join(temp.path, 'dedicated-app-$methodCommit'),
+  );
+  addTearDown(dedicated.close);
+  final project = await tester.runAsync(
+    () => ResearchExchange(dedicated).importResearch(root.path),
+  );
+  if (methodCommit != null) {
+    dedicated.saveCase(
+      ResearchCase(
+        id: 'case-$methodCommit',
+        projectId: project!.id,
+        question: '历史问题',
+        methodCommit: methodCommit,
+        processState: 'reading',
+        scientificJudgement: 'open',
+      ),
+    );
+  }
+  await tester.pumpWidget(WorkbenchApp(store: dedicated));
+  await settle(tester);
+}
+
+String _log(List<Map<String, dynamic>> rows) => rows
+    .map(
+      (r) =>
+          '${jsonEncode({'schema_version': 2, 'updated_at': '2026-10-01T12:00:00Z', ...r})}\n',
+    )
+    .join();
