@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path/path.dart' as p;
+import '../core/case_models.dart';
+import '../core/case_store.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
@@ -87,6 +89,20 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     Icons.device_hub_outlined,
   ];
   WorkbenchStore get store => widget.store;
+
+  /// First saved case wins; a project with no case uses the V6.6 method.
+  String get methodCommit {
+    final id = project?.id;
+    if (id == null) return defaultMethodCommit;
+    final cases = store.casesFor(id);
+    return cases.isEmpty ? defaultMethodCommit : cases.first.methodCommit;
+  }
+
+  List<String> skillLabels(RevisionGroup group) => [
+    ...revisionBadges(group),
+    ...methodHintLabels(reviewHint(group, methodCommit)),
+  ];
+
   ResearchProject? get project {
     final all = store.projects();
     if (all.isEmpty) return null;
@@ -829,7 +845,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               title: Text(g.current.title),
               subtitle: Text(
                 [
-                  if (p.isSkill) ...revisionBadges(g),
+                  if (p.isSkill) ...skillLabels(g),
                   entrySubtitle(g.current),
                 ].where((s) => s.isNotEmpty).join(' · '),
                 maxLines: 3,
@@ -900,7 +916,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               children: [
                 Text(
                   [
-                    if (group != null) ...revisionBadges(group),
+                    if (group != null) ...skillLabels(group),
                     entrySubtitle(e),
                   ].where((s) => s.isNotEmpty).join(' · '),
                 ),
