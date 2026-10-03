@@ -13,6 +13,7 @@ import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
+import 'outline_link_dialog.dart';
 import 'run_assessment_dialog.dart';
 import 'writing_page.dart';
 import 'theme.dart';
@@ -1462,32 +1463,10 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   }
 
   Future<void> linkEvidence(String id) async {
-    final heading = TextEditingController(text: '研究结果与讨论');
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('关联提纲段落'),
-        content: TextField(
-          controller: heading,
-          decoration: const InputDecoration(labelText: '段落标题'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: const Text('关联'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true && heading.text.trim().isNotEmpty) {
-      store.addOutline(project!.id, heading.text.trim(), id);
-      refresh();
-      message('已关联论文提纲');
-    }
+    final heading = await linkToOutline(context, store, project!.id, id);
+    if (heading == null) return;
+    refresh();
+    message('已关联论文提纲：$heading');
   }
 
   Widget writing() {

@@ -10,6 +10,7 @@ import 'package:pdfrx/pdfrx.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import 'entry_picker.dart';
+import '../app/outline_link_dialog.dart';
 
 /// Reads the imported snapshot; notes are separate records, never source edits.
 class ReaderPage extends StatefulWidget {
@@ -215,40 +216,18 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Future<void> _linkNote(ReadingNote note) async {
-    var heading = '研究结果与讨论';
-    final linked = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('关联提纲段落'),
-        content: TextFormField(
-          initialValue: heading,
-          onChanged: (value) => heading = value,
-          decoration: const InputDecoration(labelText: '段落标题'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('关联'),
-          ),
-        ],
-      ),
+    final heading = await linkToOutline(
+      context,
+      widget.store,
+      widget.document.projectId,
+      note.id,
     );
-    if (linked == true && heading.trim().isNotEmpty) {
-      widget.store.addOutline(
-        widget.document.projectId,
-        heading.trim(),
-        note.id,
-      );
-      widget.onChanged?.call();
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('精读证据已关联提纲')));
-      }
+    if (heading == null) return;
+    widget.onChanged?.call();
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('精读证据已关联提纲：$heading')));
     }
   }
 

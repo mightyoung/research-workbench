@@ -544,6 +544,41 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('evidence links to an existing outline section by dropdown', (
+    tester,
+  ) async {
+    final intro = store.addSection(projectId, 'Introduction');
+    store.addSection(projectId, 'Method', level: 2);
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    await tester.tap(find.text('Conditional evidence'));
+    await settle(tester);
+    await tester.tap(find.text('关联论文提纲'));
+    await settle(tester);
+    expect(field('段落标题'), findsNothing);
+    await tester.tap(find.textContaining('Method'));
+    await settle(tester);
+    await tester.tap(find.text('Introduction').last);
+    await settle(tester);
+    await tester.tap(find.text('关联'));
+    await settle(tester);
+    final claim = store.entries(projectId, kind: 'claims').single;
+    expect(store.outline(projectId).single['section_id'], intro.id);
+    expect(store.outline(projectId).single['evidence_id'], claim.id);
+    expect(store.sections(projectId), hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
     await settle(tester);

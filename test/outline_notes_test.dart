@@ -123,6 +123,19 @@ void main() {
     expect(store.sections(projectId).single.heading, 'Method');
   });
 
+  test('citing targets a section by id and ignores repeats', () async {
+    final (projectId, _, claimId) = await fixture();
+    final a = store.addSection(projectId, 'Same');
+    final b = store.addSection(projectId, 'Same');
+    store.cite(b.id, claimId);
+    store.cite(b.id, claimId);
+    final rows = store.outline(projectId);
+    expect(rows.single['section_id'], b.id);
+    expect(rows.single['heading'], 'Same');
+    expect(rows.where((r) => r['section_id'] == a.id), isEmpty);
+    expect(() => store.cite('missing', claimId), throwsStateError);
+  });
+
   test('v4 outline rows migrate into sections by heading', () {
     final root = p.join(temp.path, 'v4');
     Directory(root).createSync();

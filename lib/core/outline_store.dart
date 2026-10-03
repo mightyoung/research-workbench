@@ -87,9 +87,27 @@ extension OutlineStore on WorkbenchStore {
           projectId,
         ).where((s) => s.heading == heading.trim()).firstOrNull ??
         addSection(projectId, heading);
+    cite(section.id, evidenceId);
+  }
+
+  /// Cites [evidenceId] in a section; citing it there again is a no-op.
+  void cite(String sectionId, String evidenceId) {
+    final rows = db.select('SELECT * FROM sections WHERE id=?', [sectionId]);
+    if (rows.isEmpty) throw StateError('Unknown section');
+    final s = rows.single;
     db.execute(
-      'INSERT INTO outline(id,project_id,heading,evidence_id,section_id) VALUES(?,?,?,?,?)',
-      [const Uuid().v4(), projectId, section.heading, evidenceId, section.id],
+      'INSERT INTO outline(id,project_id,heading,evidence_id,section_id) '
+      'SELECT ?,?,?,?,? WHERE NOT EXISTS '
+      '(SELECT 1 FROM outline WHERE section_id=? AND evidence_id=?)',
+      [
+        const Uuid().v4(),
+        s['project_id'],
+        s['heading'],
+        evidenceId,
+        sectionId,
+        sectionId,
+        evidenceId,
+      ],
     );
   }
 
