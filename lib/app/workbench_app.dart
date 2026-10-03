@@ -528,7 +528,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   Widget overview() {
     final p = project!;
     final entries = latestRevisions(store.entries(p.id));
-    final docs = store.documents(p.id);
+    final docs = currentVersions(store.documents(p.id));
     final readme = docs
         .where((d) => d.relativePath.toLowerCase() == 'readme.md')
         .firstOrNull;
@@ -911,7 +911,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   }
 
   void findSource(ResearchEntry e) {
-    final all = store.documents(project!.id);
+    final all = currentVersions(store.documents(project!.id));
     final slug = '${e.data['work_id'] ?? ''}';
     final matches = all
         .where((d) => slug.isNotEmpty && d.relativePath.contains('/$slug/'))
