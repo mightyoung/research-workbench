@@ -4,7 +4,9 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:research_workbench/core/exchange.dart';
+import 'package:research_workbench/core/models.dart';
 import 'package:research_workbench/core/store.dart';
+import 'package:research_workbench/reader/entry_picker.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 void main() {
@@ -141,6 +143,23 @@ void main() {
     store.deleteSection(findings.id);
     expect(store.outline(projectId), isEmpty);
     expect(store.sections(projectId).single.heading, 'Method');
+  });
+
+  test('note picker keeps a link to a superseded revision visible', () {
+    ResearchEntry claim(String id, int rev) => ResearchEntry(
+      id: id,
+      projectId: 'p',
+      kind: 'claims',
+      title: 'c r$rev',
+      data: {'id': 'c1', 'rev': rev},
+    );
+    final entries = [claim('old', 1), claim('new', 2)];
+    expect(noteTargets(entries).map((e) => e.id), ['new']);
+    expect(noteTargets(entries, linked: 'old').map((e) => e.id), [
+      'new',
+      'old',
+    ]);
+    expect(noteTargets(entries, linked: 'new').map((e) => e.id), ['new']);
   });
 
   test('v4 outline rows migrate into sections by heading', () {
