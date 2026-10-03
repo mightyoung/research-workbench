@@ -227,15 +227,22 @@ const refScheme = 'wbref';
 /// Turns `[kind/id@rev]` deliverable references into tappable links, leaving
 /// fenced blocks and inline code untouched.
 String linkSkillRefs(String markdown) {
-  var fenced = false;
+  // Open fence marker (``` or ~~~); a fence closes only with its own marker.
+  String? fence;
   return markdown
       .split('\n')
       .map((line) {
-        if (line.trimLeft().startsWith('```')) {
-          fenced = !fenced;
+        final trimmed = line.trimLeft();
+        final marker = trimmed.startsWith('```')
+            ? '```'
+            : trimmed.startsWith('~~~')
+            ? '~~~'
+            : null;
+        if (marker != null && (fence == null || fence == marker)) {
+          fence = fence == null ? marker : null;
           return line;
         }
-        if (fenced) return line;
+        if (fence != null) return line;
         final parts = line.split('`');
         for (var i = 0; i < parts.length; i += 2) {
           parts[i] = parts[i].replaceAllMapped(

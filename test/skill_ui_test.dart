@@ -105,6 +105,55 @@ void main() {
       expect(find.text('绑定论文'), findsOneWidget);
       expect(find.text('获取的论文'), findsOneWidget);
       expect(find.text('证据类型（可选，回写用）'), findsOneWidget);
+
+      // The evidence dropdown must clear together with the saved value.
+      final dropdown = find.byType(DropdownButtonFormField<String>);
+      await tester.ensureVisible(dropdown);
+      await settle(tester);
+      await tester.tap(dropdown);
+      await settle(tester);
+      await tester.tap(find.text('论文原述').last);
+      await settle(tester);
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.labelText == '精读笔记 / 批注',
+        ),
+        '分开评估',
+      );
+      await tester.ensureVisible(find.text('保存笔记'));
+      await tester.tap(find.text('保存笔记'));
+      await settle(tester);
+      expect(find.text('论文原述'), findsNothing);
+      final doc = store
+          .documents(store.projects().single.id)
+          .firstWhere((d) => d.relativePath.endsWith('notes.md'));
+      expect(store.notes(doc.id).single.evidenceKind, 'paper_statement');
     },
   );
+
+  testWidgets('generic projects keep records marked active: false visible', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final generic = WorkbenchStore.open(p.join(temp.path, 'generic-app'));
+    addTearDown(generic.close);
+    File(p.join(temp.path, 'plain', 'papers.jsonl'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('{"id":"g1","title":"普通记录","active":false}\n');
+    await tester.runAsync(
+      () =>
+          ResearchExchange(generic).importResearch(p.join(temp.path, 'plain')),
+    );
+    await tester.pumpWidget(WorkbenchApp(store: generic));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    expect(find.text('普通记录'), findsOneWidget);
+    expect(find.text('显示已退役'), findsNothing);
+  });
 }

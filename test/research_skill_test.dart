@@ -129,6 +129,28 @@ void main() {
     expect(store.bindings(project.id), isEmpty);
   });
 
+  test('tilde fences protect references; mixed markers do not close', () {
+    const md = '~~~\n[claims/c1@1]\n```\n[claims/c2@1]\n~~~\n[claims/c3@1]';
+    final out = linkSkillRefs(md);
+    expect(out, contains('\n[claims/c1@1]\n'));
+    expect(out, contains('\n[claims/c2@1]\n'));
+    expect(out, endsWith('[claims/c3@1](wbref:claims/c3@1)'));
+  });
+
+  test(
+    'same-named JSONL outside research/ is not an authoritative log',
+    () async {
+      final files = skillProject()
+        ..['backup/claims.jsonl'] =
+            '${jsonEncode({'schema_version': 2, 'id': 'c1', 'rev': 9, 'statement': '备份'})}\n';
+      final project = await exchange.importResearch(write(files).path);
+      final claims = store.entries(project.id, kind: 'claims');
+      expect(claims.map(revOf), isNot(contains(9)));
+      expect(revOf(revisionGroups(claims).single.current), 2);
+      expect(store.entries(project.id, kind: 'other').single.title, '备份');
+    },
+  );
+
   test('links deliverable references outside code', () {
     const md =
         'See [claims/c1@2] and [papers/p1-v1@3](x).\n`[claims/c9@1]`\n```\n[claims/c8@1]\n```\n[notes/x@1]';

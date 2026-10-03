@@ -37,6 +37,8 @@ class _ReaderPageState extends State<ReaderPage> {
   final _note = TextEditingController();
   final _doesNotSupport = TextEditingController();
   String? _evidenceKind;
+  // Bumped after saving so the evidence dropdown rebuilds empty.
+  int _formGeneration = 0;
   late final Future<String> _markdown;
   int _page = 1;
   int _pageCount = 0;
@@ -313,6 +315,7 @@ class _ReaderPageState extends State<ReaderPage> {
       _quote.clear();
       _doesNotSupport.clear();
       _evidenceKind = null;
+      _formGeneration++;
       widget.onChanged?.call();
       setState(() {});
       ScaffoldMessenger.of(
@@ -458,6 +461,7 @@ class _ReaderPageState extends State<ReaderPage> {
         if (bound != null) ...[
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
+            key: ValueKey(_formGeneration),
             initialValue: _evidenceKind,
             decoration: const InputDecoration(labelText: '证据类型（可选，回写用）'),
             items: const [

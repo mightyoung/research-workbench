@@ -4,7 +4,7 @@
 
 分支 `feat/research-skill-integration`，参考 research-skill v6.5（`bd9e9d8`）。
 
-- `flutter analyze`：无问题。`flutter test`：37 项通过，新增 `research_skill_test.dart`（识别、过滤、修订、绑定、引用、回写草稿、报告引用）和 `skill_ui_test.dart`（桌面尺寸下的文库修订视图、论文绑定、引用链接、阅读器绑定卡片）。夹具为手写合成数据，结构对照 v6.5，未复制上游文件。
+- `flutter analyze`：无问题。`flutter test`：40 项通过（含 Codex 审查后的 3 项回归测试），新增 `research_skill_test.dart`（识别、过滤、修订、绑定、引用、回写草稿、报告引用）和 `skill_ui_test.dart`（桌面尺寸下的文库修订视图、论文绑定、引用链接、阅读器绑定卡片）。夹具为手写合成数据，结构对照 v6.5，未复制上游文件。
 - 端到端：复制 v6.5 `examples/v2-case/update`，为其中 `p-recent-v1`（`9999.00004v1`）补一份合成 `paper.pdf` 和 arXiv 风格 `manifest.json` 后导入。绑定到 `p-recent-v1@2`，方法 `arxiv_manifest`，哈希一致。在该 PDF 上写一条笔记并导出草稿：
   - 草稿原样追加到 `research/claims.jsonl`，`check-research.py --strict-v2` 输出 FAIL（缺 `locator_reliability`、`supports_statement`、`scope`），符合"未补全不能冒充正式证据"的设计。
   - 人工补全 `locator.page`、`locator_reliability`、`supports_statement`、`scope` 后追加，输出 PASS；保留或移除 `workbench` 溯源字段、保留 `locator.pdf_page` 均通过。

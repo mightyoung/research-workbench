@@ -706,7 +706,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         (p.isSkill
                 ? revisionGroups(rows)
                 : rows.map((e) => RevisionGroup([e])).toList())
-            .where((g) => showRetired || !g.retired)
+            .where((g) => !p.isSkill || showRetired || !g.retired)
             .where(
               (g) => '${g.current.title} ${jsonEncode(g.current.data)}'
                   .toLowerCase()

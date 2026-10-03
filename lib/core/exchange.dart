@@ -212,8 +212,12 @@ class ResearchExchange {
         }
         if (ext == '.jsonl') {
           final base = p.basenameWithoutExtension(relative);
-          final kind = skillKinds.contains(base) ? base : 'other';
           final isLog = projectPath == 'research/$base.jsonl';
+          // In research-skill projects only <root>/research/*.jsonl are
+          // authoritative logs; same-named copies elsewhere stay 'other'.
+          final kind = skillKinds.contains(base) && (root == null || isLog)
+              ? base
+              : 'other';
           var line = 0;
           for (final text in const LineSplitter().convert(
             await entity.readAsString(),
