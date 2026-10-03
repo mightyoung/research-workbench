@@ -134,7 +134,7 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
       .toList();
   List<ResearchDocument> documents(String projectId) => db
       .select(
-        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path',
+        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path,rowid',
         [projectId],
       )
       .map(

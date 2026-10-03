@@ -130,6 +130,60 @@ void main() {
     expect(actual['execution_state'], 'completed');
     expect(actual['budget_spent'], 2);
     expect(actual['executed_at'], assessed.data['finishedAt']);
+    expect(record['rev'], 1);
+
+    Future<Map<String, dynamic>> exportAgain() async => jsonDecode(
+      File(
+        await ResearchExchange(
+          store,
+        ).exportSkillExperiment(store.runs('p').single, temp.path),
+      ).readAsLinesSync().single,
+    );
+    final same = await exportAgain();
+    expect((same['id'], same['rev']), (record['id'], 1));
+    store.assessRun(
+      run.id,
+      result: 'inconclusive',
+      discriminating: true,
+      reason: 'rechecked: confound remains',
+      budgetSpent: 2,
+    );
+    final corrected = await exportAgain();
+    expect((corrected['id'], corrected['rev']), (record['id'], 2));
+    expect(corrected['actual']['result'], 'inconclusive');
+  });
+
+  test('assessing an imported result keeps re-import idempotent', () async {
+    final task = store.saveTask(
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      spec: {},
+    );
+    final result = File(p.join(temp.path, 'result.json'))
+      ..writeAsStringSync(
+        jsonEncode({
+          'format': 'research-result-v1',
+          'runId': 'run-1',
+          'taskId': task.id,
+          'taskRevision': task.revision,
+          'status': 'completed',
+          'metrics': {'x': 1},
+          'logs': <String>[],
+          'artifacts': <String>[],
+        }),
+      );
+    final exchange = ResearchExchange(store);
+    await exchange.importResult(result.path);
+    store.assessRun(
+      'run-1',
+      result: 'inconclusive',
+      discriminating: false,
+      reason: 'single seed',
+    );
+    final again = await exchange.importResult(result.path);
+    expect(again.data['workbench_assessment'], isNotNull);
+    expect(store.runs('p'), hasLength(1));
   });
 
   test('editing outcome data drops the earlier assessment', () {
@@ -216,6 +270,8 @@ void main() {
       'yesterday',
       '2026-10-03T08:00:00',
       '2026-13-40T00:00Z',
+      '2026-10-03T99:99:99Z',
+      '2026-10-03T08:00:00+25:00',
     ]) {
       expect(
         () => record('completed', ok, finishedAt: time),

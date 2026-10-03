@@ -93,6 +93,7 @@ Map<String, dynamic> executedExperiment({
   required ResearchTask task,
   required ResearchRun run,
   required DateTime now,
+  int rev = 1,
 }) {
   final source = task.spec['source'];
   if (source is! Map ||
@@ -137,7 +138,7 @@ Map<String, dynamic> executedExperiment({
   return {
     'schema_version': 2,
     'id': '${source['id']}-run-$short',
-    'rev': 1,
+    'rev': rev,
     'updated_at': now.toUtc().toIso8601String(),
     'title': '${task.title} · 运行 $short',
     'phase': 'executed',
@@ -167,13 +168,23 @@ Map<String, dynamic> executedExperiment({
   };
 }
 
-/// ISO-8601 date-time with an explicit `Z` or UTC offset, and a real date.
+/// ISO-8601 date-time with an explicit `Z` or UTC offset whose every
+/// component is in range (no normalising of 25:00 or 2026-13-40).
 bool _isoInstant(String value) {
   final m = RegExp(
-    r'^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$',
+    r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?'
+    r'(?:Z|[+-](\d{2}):?(\d{2}))$',
   ).firstMatch(value);
   if (m == null) return false;
-  final (y, mo, d) = (int.parse(m[1]!), int.parse(m[2]!), int.parse(m[3]!));
+  int at(int i) => int.parse(m[i] ?? '0');
+  final (y, mo, d) = (at(1), at(2), at(3));
   final date = DateTime.utc(y, mo, d);
-  return date.year == y && date.month == mo && date.day == d;
+  return date.year == y &&
+      date.month == mo &&
+      date.day == d &&
+      at(4) < 24 &&
+      at(5) < 60 &&
+      at(6) < 60 &&
+      at(7) <= 14 &&
+      at(8) < 60;
 }
