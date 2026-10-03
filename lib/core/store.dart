@@ -5,6 +5,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'skill_bridge.dart';
+export 'outline_store.dart';
 
 class WorkbenchStore {
   WorkbenchStore._(this.rootPath, this.db);
@@ -30,6 +31,18 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     (db) => db.execute(
       "ALTER TABLE notes ADD COLUMN page_number INTEGER; ALTER TABLE notes ADD COLUMN quoted_text TEXT NOT NULL DEFAULT '';",
     ),
+    // v5: notes may point at a research record; outline links group into
+    // ordered sections. Existing outline rows become one section per heading.
+    (db) => db.execute('''
+CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT,evidence_id TEXT);
+ALTER TABLE notes ADD COLUMN entry_id TEXT;
+CREATE TABLE sections(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT NOT NULL,level INTEGER NOT NULL DEFAULT 1,position INTEGER NOT NULL,argument TEXT NOT NULL DEFAULT '',support TEXT NOT NULL DEFAULT 'unassessed');
+ALTER TABLE outline ADD COLUMN section_id TEXT REFERENCES sections(id);
+INSERT INTO sections(id,project_id,heading,position)
+  SELECT lower(hex(randomblob(16))),project_id,heading,ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY MIN(rowid))
+  FROM outline GROUP BY project_id,heading;
+UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=outline.project_id AND s.heading=outline.heading);
+'''),
   ];
   static int get schemaVersion => _migrations.length;
 
@@ -187,7 +200,9 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     data: decode(r['data']),
   );
   List<ReadingNote> notes(String documentId) => db
-      .select('SELECT * FROM notes WHERE document_id=?', [documentId])
+      .select('SELECT * FROM notes WHERE document_id=? ORDER BY rowid', [
+        documentId,
+      ])
       .map(
         (r) => ReadingNote(
           id: r['id'],
@@ -196,9 +211,25 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
           text: r['text'],
           pageNumber: r['page_number'],
           quote: r['quoted_text'],
+          entryId: r['entry_id'],
         ),
       )
       .toList();
+
+  /// Points a note at a research record of its document's project, or
+  /// clears the link with null.
+  void setNoteEntry(String noteId, String? entryId) {
+    if (entryId != null &&
+        db.select(
+          'SELECT 1 FROM notes n JOIN documents d ON d.id=n.document_id '
+          'JOIN entries e ON e.project_id=d.project_id WHERE n.id=? AND e.id=?',
+          [noteId, entryId],
+        ).isEmpty) {
+      throw StateError('Note or research record not found in this project');
+    }
+    db.execute('UPDATE notes SET entry_id=? WHERE id=?', [entryId, noteId]);
+  }
+
   void saveProject(
     String id, {
     required String question,
@@ -214,14 +245,24 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     String text, {
     int? pageNumber,
     String quote = '',
+    String? entryId,
   }) {
     if (pageNumber != null && pageNumber < 1) {
       throw const FormatException('Page number must be positive');
     }
-    db.execute(
-      'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text) VALUES(?,?,?,?,?,?)',
-      [const Uuid().v4(), documentId, locator, text, pageNumber, quote.trim()],
-    );
+    final id = const Uuid().v4();
+    db.execute('BEGIN');
+    try {
+      db.execute(
+        'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text) VALUES(?,?,?,?,?,?)',
+        [id, documentId, locator, text, pageNumber, quote.trim()],
+      );
+      if (entryId != null) setNoteEntry(id, entryId);
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   ResearchTask saveTask({
@@ -372,17 +413,13 @@ CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCE
     );
   }
 
-  void addOutline(String projectId, String heading, String evidenceId) =>
-      db.execute('INSERT INTO outline VALUES(?,?,?,?)', [
-        const Uuid().v4(),
-        projectId,
-        heading,
-        evidenceId,
-      ]);
+  /// Outline evidence links in section order; see `outline_store.dart`.
   List<Map<String, dynamic>> outline(String projectId) => db
-      .select('SELECT * FROM outline WHERE project_id=? ORDER BY rowid', [
-        projectId,
-      ])
+      .select(
+        'SELECT o.* FROM outline o LEFT JOIN sections s ON s.id=o.section_id '
+        'WHERE o.project_id=? ORDER BY s.position,o.rowid',
+        [projectId],
+      )
       .map((r) => Map<String, dynamic>.from(r))
       .toList();
   static Map<String, dynamic> decode(String value) =>

@@ -14,6 +14,7 @@ import '../relations/relations_page.dart';
 import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
 import 'run_assessment_dialog.dart';
+import 'writing_page.dart';
 import 'theme.dart';
 
 class WorkbenchApp extends StatelessWidget {
@@ -835,6 +836,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         ),
   ];
 
+  List<(ResearchDocument, ReadingNote)> notesAbout(String entryId) => [
+    for (final doc in store.documents(project!.id))
+      for (final note in store.notes(doc.id))
+        if (note.entryId == entryId) (doc, note),
+  ];
+
   Future<void> showEntry(ResearchEntry e) async {
     final d = e.data;
     await showDialog<void>(
@@ -860,6 +867,29 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                   SelectableText(
                     'DOI / 原文地址\n${d['doi'] ?? ''}\n${d['url'] ?? ''}',
                   ),
+                if (notesAbout(e.id) case final linked
+                    when linked.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text('相关精读笔记 (${linked.length})'),
+                  for (final (doc, note) in linked)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      leading: const Icon(Icons.format_quote_outlined),
+                      title: Text(
+                        note.quote.isEmpty ? note.text : '“${note.quote}”',
+                      ),
+                      subtitle: Text(
+                        '${doc.relativePath}'
+                        '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
+                        '${note.quote.isEmpty ? '' : ' · ${note.text}'}',
+                      ),
+                      onTap: () {
+                        Navigator.pop(c);
+                        openDocument(doc);
+                      },
+                    ),
+                ],
                 const SizedBox(height: 12),
                 const Text('原始记录（状态按来源保留）'),
                 const SizedBox(height: 8),
@@ -1462,81 +1492,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
 
   Widget writing() {
     final p = project!;
-    final outline = store.outline(p.id);
-    final entries = store.entries(p.id);
-    final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
-      for (final doc in store.documents(p.id))
-        for (final note in store.notes(doc.id)) note.id: (doc, note),
-    };
-    return layout([
-      card(
-        '证据驱动的论文提纲',
-        const Text('从主张详情或已接纳运行中选择证据，关联到段落。导出报告保留证据来源和状态，方便继续写作与复审。'),
-      ),
-      Wrap(
-        spacing: 12,
-        runSpacing: 8,
-        children: [
-          FilledButton.icon(
-            onPressed: () async {
-              await action(() async {
-                final path = await ResearchExchange(
-                  store,
-                ).exportReport(p.id, exportDirectory);
-                await saveGenerated(path, 'text/markdown');
-              });
-            },
-            icon: const Icon(Icons.description_outlined),
-            label: const Text('导出 Markdown 研究报告'),
-          ),
-          OutlinedButton(
-            onPressed: () => setState(() {
-              section = 1;
-              entryKind = 'claims';
-            }),
-            child: const Text('选择主张与证据'),
-          ),
-        ],
-      ),
-      ...outline.map((row) {
-        final id = '${row['evidence_id'] ?? row['evidenceId'] ?? ''}';
-        final e = entries.where((e) => e.id == id).firstOrNull;
-        final note = noteEvidence[id];
-        return card(
-          '${row['heading']}',
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                e?.title ??
-                    (note == null
-                        ? '运行结果 / 产物'
-                        : '精读证据 · ${note.$1.relativePath}'
-                              '${note.$2.pageNumber == null ? '' : ' · p. ${note.$2.pageNumber}'}'),
-              ),
-              SelectableText(id),
-              if (note != null && note.$2.quote.isNotEmpty)
-                SelectableText('“${note.$2.quote}”'),
-              if (e != null)
-                TextButton(
-                  onPressed: () => showEntry(e),
-                  child: const Text('查看证据'),
-                ),
-              if (note != null)
-                TextButton(
-                  onPressed: () => openDocument(note.$1),
-                  child: const Text('打开精读来源'),
-                ),
-              IconButton(
-                tooltip: '复制证据 ID',
-                onPressed: () => Clipboard.setData(ClipboardData(text: id)),
-                icon: const Icon(Icons.copy, size: 18),
-              ),
-            ],
-          ),
-        );
+    return WritingPage(
+      key: ValueKey(p.id),
+      store: store,
+      projectId: p.id,
+      onExportReport: () => action(() async {
+        final path = await ResearchExchange(
+          store,
+        ).exportReport(p.id, exportDirectory);
+        await saveGenerated(path, 'text/markdown');
       }),
-      if (outline.isEmpty) const Text('提纲尚未关联证据。先选择一条主张或一份已接纳结果。'),
-    ]);
+      onPickEvidence: () => setState(() {
+        section = 1;
+        entryKind = 'claims';
+      }),
+      onShowEntry: showEntry,
+      onOpenDocument: openDocument,
+    );
   }
 }

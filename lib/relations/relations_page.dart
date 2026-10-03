@@ -94,6 +94,7 @@ class _RelationsPageState extends State<RelationsPage> {
               'page_number': note.pageNumber,
               'locator': note.locator,
               'quote': note.quote,
+              'entry_id': note.entryId,
               'text': note.text,
             },
           ),
@@ -184,6 +185,12 @@ class _RelationsPageState extends State<RelationsPage> {
           data['task_revision'],
           '执行规格',
         );
+      }
+      if (object.kind == 'note' && data['entry_id'] != null) {
+        final matches = _objects
+            .where((e) => e.key == data['entry_id'])
+            .toList();
+        _resolved(object, matches, '笔记关联', '${data['entry_id']}');
       }
       if (object.kind == 'outline') {
         final matches = _objects

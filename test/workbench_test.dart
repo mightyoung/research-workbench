@@ -487,6 +487,63 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('outline sections are edited, ordered and cite several items', (
+    tester,
+  ) async {
+    final claim = store.entries(projectId, kind: 'claims').single;
+    final doc = store.documents(projectId).single;
+    store.saveNote(doc.id, 'p.1', 'about the claim', entryId: claim.id);
+    final note = store.notes(doc.id).single;
+    store.addOutline(projectId, 'Findings', claim.id);
+    store.addOutline(projectId, 'Findings', note.id);
+    store.addSection(projectId, 'Limits');
+    tester.view.physicalSize = const Size(1280, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('论文写作'));
+    await settle(tester);
+    expect(find.text('Findings'), findsOneWidget);
+    expect(find.byTooltip('移除此证据'), findsNWidgets(2));
+    await tester.tap(find.byTooltip('编辑段落').first);
+    await settle(tester);
+    await tester.enterText(
+      field('本段论述（证据支持什么）'),
+      'Rework resets completion state.',
+    );
+    await tester.tap(find.text('未评估').last);
+    await settle(tester);
+    await tester.tap(find.text('部分支持').last);
+    await settle(tester);
+    await tester.tap(find.text('保存段落'));
+    await settle(tester);
+    expect(find.text('Rework resets completion state.'), findsOneWidget);
+    expect(store.sections(projectId).first.support, 'partial');
+    await tester.tap(find.byTooltip('下移').first);
+    await settle(tester);
+    expect(store.sections(projectId).map((s) => s.heading), [
+      'Limits',
+      'Findings',
+    ]);
+    await tester.tap(find.byTooltip('移除此证据').first);
+    await settle(tester);
+    expect(store.outline(projectId), hasLength(1));
+
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    await tester.tap(find.text('Conditional evidence'));
+    await settle(tester);
+    expect(find.text('相关精读笔记 (1)'), findsOneWidget);
+    expect(find.text('about the claim'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
     await settle(tester);

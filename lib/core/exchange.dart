@@ -136,7 +136,7 @@ class ResearchExchange {
   /// Imports a research snapshot. With [intoProjectId] the snapshot refreshes
   /// that project: records and documents keep their local IDs so notes and
   /// outline links survive; records gone from the source are dropped unless
-  /// the outline cites them, documents unless they carry notes.
+  /// the outline or a note cites them, documents unless they carry notes.
   Future<ResearchProject> importResearch(
     String directoryOrZipPath, {
     String? intoProjectId,
@@ -241,7 +241,8 @@ class ResearchExchange {
       }
       for (final entryId in oldEntries.values.expand((ids) => ids)) {
         store.db.execute(
-          'DELETE FROM entries WHERE id=? AND id NOT IN (SELECT evidence_id FROM outline)',
+          'DELETE FROM entries WHERE id=? AND id NOT IN (SELECT evidence_id FROM outline) '
+          'AND id NOT IN (SELECT entry_id FROM notes WHERE entry_id IS NOT NULL)',
           [entryId],
         );
       }
@@ -662,30 +663,34 @@ class ResearchExchange {
     final out = StringBuffer(
       '# ${project.title}\n\n${project.question}\n\n下一步：${project.nextStep}\n\n',
     );
-    for (final item in store.outline(projectId)) {
-      out.writeln('## ${item['heading']}\n');
-      final evidence = item['evidence_id'];
-      if (entries.containsKey(evidence)) {
-        final entry = entries[evidence]!;
-        out.writeln(
-          '${entry.title}\n\n来源记录：$evidence\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
-        );
-      } else if (accepted.containsKey(evidence)) {
-        final run = accepted[evidence]!;
-        out.writeln(
-          '执行记录：${run.id}，任务 ${run.taskId} r${run.taskRevision}，状态 ${run.status}\n\n指标：${jsonEncode(run.data['metrics'] ?? {})}\n\n产物：${jsonEncode(run.data['artifacts'] ?? [])}\n\n人工关联为证据；此状态不代表科学结论已验证。\n',
-        );
-      } else if (noteEvidence.containsKey(evidence)) {
-        final (doc, note) = noteEvidence[evidence]!;
-        out.writeln(
-          '精读证据：${note.id}\n\n来源：${doc.relativePath}'
-          '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
-          '${note.locator.isEmpty ? '' : ' · ${note.locator}'}\n\n'
-          '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
-          '${note.text}\n',
-        );
-      } else {
-        out.writeln('待复审或未接纳的证据：$evidence\n');
+    String about(ReadingNote note) => note.entryId == null
+        ? ''
+        : '关联研究对象：${entries[note.entryId]?.title ?? note.entryId}\n\n';
+    String evidence(String id) {
+      if (entries[id] case final entry?) {
+        return '${entry.title}\n\n来源记录：$id\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n';
+      }
+      if (accepted[id] case final run?) {
+        return '执行记录：${run.id}，任务 ${run.taskId} r${run.taskRevision}，状态 ${run.status}\n\n指标：${jsonEncode(run.data['metrics'] ?? {})}\n\n产物：${jsonEncode(run.data['artifacts'] ?? [])}\n\n人工关联为证据；此状态不代表科学结论已验证。\n';
+      }
+      if (noteEvidence[id] case (final doc, final note)) {
+        return '精读证据：${note.id}\n\n来源：${doc.relativePath}'
+            '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
+            '${note.locator.isEmpty ? '' : ' · ${note.locator}'}\n\n'
+            '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
+            '${about(note)}${note.text}\n';
+      }
+      return '待复审或未接纳的证据：$id\n';
+    }
+
+    final links = store.outline(projectId);
+    for (final section in store.sections(projectId)) {
+      out.writeln('${'#' * (section.level + 1)} ${section.heading}\n');
+      if (section.argument.isNotEmpty) out.writeln('${section.argument}\n');
+      out.writeln('证据支持程度：${sectionSupport[section.support]}\n');
+      final cited = links.where((l) => l['section_id'] == section.id).toList();
+      for (final (i, link) in cited.indexed) {
+        out.writeln('**证据 ${i + 1}**\n\n${evidence('${link['evidence_id']}')}');
       }
     }
     out.writeln('## 精读笔记\n');
@@ -695,7 +700,7 @@ class ResearchExchange {
           '### ${doc.relativePath} · ${note.locator}'
           '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}\n\n'
           '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
-          '${note.text}\n',
+          '${about(note)}${note.text}\n',
         );
       }
     }
