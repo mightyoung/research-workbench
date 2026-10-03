@@ -253,8 +253,20 @@ class ResearchExchange {
       oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
       oldData[e.id] = e.data;
     }
-    // Newest version per path; older versions kept for their notes stay put.
-    final oldDocs = {for (final d in store.documents(id)) d.relativePath: d};
+    // Newest version per project-relative path (a ZIP's top-level folder is
+    // not part of it); older versions kept for their notes stay put.
+    final oldDocs = {
+      for (final d in store.documents(id))
+        _docKey(d.relativePath, existing?.skillRoot ?? ''): d,
+    };
+    // Manual binding choices survive a refresh when the same ambiguity recurs.
+    final manual = <String, List<String>>{};
+    for (final b in store.bindings(id)) {
+      if (b.method.endsWith('+manual')) {
+        manual.putIfAbsent(b.documentId, () => []).add(b.paperId);
+      }
+    }
+    final carry = <String, List<String>>{};
     store.db.execute('BEGIN');
     try {
       final manifest = File(p.join(snapshot.path, 'manifest.json'));
@@ -268,13 +280,6 @@ class ResearchExchange {
         store.db.execute(
           'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
           [id, title, '', ''],
-        );
-      } else {
-        // Bindings point at document rows; they are recomputed below.
-        store.db.execute(
-          'DELETE FROM paper_bindings WHERE document_id IN '
-          '(SELECT id FROM documents WHERE project_id=?)',
-          [id],
         );
       }
       // research-skill bookkeeping, keyed by project-relative POSIX path.
@@ -300,7 +305,7 @@ class ResearchExchange {
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
           found++;
           final hash = sha256.convert(await entity.readAsBytes()).toString();
-          final old = oldDocs.remove(relative);
+          final old = oldDocs.remove(_docKey(relative, root ?? ''));
           // Notes cite a page and quote of the bytes they were written on;
           // a changed file with notes becomes a new version beside the old.
           final keepOld =
@@ -313,9 +318,13 @@ class ResearchExchange {
           final String documentId;
           if (old != null && !keepOld) {
             documentId = old.id;
+            // Its bindings are recomputed below; retained versions keep theirs.
+            store.db.execute('DELETE FROM paper_bindings WHERE document_id=?', [
+              documentId,
+            ]);
             store.db.execute(
-              'UPDATE documents SET snapshot_path=?,sha256=? WHERE id=?',
-              [store.storedPath(entity.path), hash, documentId],
+              'UPDATE documents SET relative_path=?,snapshot_path=?,sha256=? WHERE id=?',
+              [relative, store.storedPath(entity.path), hash, documentId],
             );
           } else {
             documentId = const Uuid().v4();
@@ -323,6 +332,9 @@ class ResearchExchange {
               'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256) VALUES(?,?,?,?,?)',
               [documentId, id, relative, store.storedPath(entity.path), hash],
             );
+          }
+          if (old != null && manual[old.id] != null) {
+            carry[documentId] = manual[old.id]!;
           }
           if (projectPath != null) documents[projectPath] = (documentId, hash);
         }
@@ -384,13 +396,16 @@ class ResearchExchange {
             incomingKeys[key] = '$relative 中的 ${data['id']} 修订 ${data['rev']}';
             // Pair with an old row of identical content, else with an uncited
             // one: cited revisions are immutable and never rewritten here.
-            var pick = reuse?.indexWhere(
-              (old) => _canonical(oldData[old]) == _canonical(data),
-            );
+            // Among identical rows the cited one wins, so a leftover cited
+            // duplicate is never mistaken for changed content.
+            bool same(String old) =>
+                _canonical(oldData[old]) == _canonical(data);
+            bool cited(String old) =>
+                store.db.select(_citedSql, [old]).isNotEmpty;
+            var pick = reuse?.indexWhere((old) => same(old) && cited(old));
+            if (reuse != null && pick! < 0) pick = reuse.indexWhere(same);
             if (reuse != null && pick! < 0) {
-              pick = reuse.indexWhere(
-                (old) => store.db.select(_citedSql, [old]).isEmpty,
-              );
+              pick = reuse.indexWhere((old) => !cited(old));
             }
             final String entryId;
             if (reuse != null && pick! >= 0) {
@@ -440,10 +455,14 @@ class ResearchExchange {
         }
       }
       for (final doc in oldDocs.values) {
+        const unnoted = 'NOT IN (SELECT document_id FROM notes)';
         store.db.execute(
-          'DELETE FROM documents WHERE id=? AND id NOT IN (SELECT document_id FROM notes)',
+          'DELETE FROM paper_bindings WHERE document_id=? AND document_id $unnoted',
           [doc.id],
         );
+        store.db.execute('DELETE FROM documents WHERE id=? AND id $unnoted', [
+          doc.id,
+        ]);
       }
       var layout = 'generic';
       if (root != null) {
@@ -454,6 +473,15 @@ class ResearchExchange {
             documents: documents,
             manifests: manifests,
           ).forEach(store.insertBinding);
+          for (final MapEntry(key: doc, value: papers) in carry.entries) {
+            for (final paper in papers) {
+              final pending = store.db.select(
+                'SELECT 1 FROM paper_bindings WHERE document_id=? AND paper_id=? AND ambiguous=1',
+                [doc, paper],
+              );
+              if (pending.isNotEmpty) store.applyBindingChoice(doc, paper);
+            }
+          }
         }
       }
       store.db.execute('UPDATE projects SET layout=?,skill_root=? WHERE id=?', [
@@ -475,6 +503,12 @@ class ResearchExchange {
       await snapshot.delete(recursive: true);
       rethrow;
     }
+  }
+
+  /// Document identity across refreshes: POSIX path below the skill root.
+  static String _docKey(String relativePath, String root) {
+    final path = p.posix.joinAll(p.split(relativePath));
+    return path.startsWith(root) ? path.substring(root.length) : path;
   }
 
   // related_work/<slug>/versions/<vN>/manifest.json written by fetch-paper.sh.

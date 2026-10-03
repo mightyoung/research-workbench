@@ -359,19 +359,26 @@ CREATE TABLE case_events(
   void confirmBinding(String documentId, String paperId) {
     db.execute('BEGIN');
     try {
-      db.execute(
-        'DELETE FROM paper_bindings WHERE (document_id=? OR paper_id=?) AND NOT (document_id=? AND paper_id=?) AND ambiguous=1',
-        [documentId, paperId, documentId, paperId],
-      );
-      db.execute(
-        "UPDATE paper_bindings SET ambiguous=0,method=method||'+manual' WHERE document_id=? AND paper_id=?",
-        [documentId, paperId],
-      );
+      applyBindingChoice(documentId, paperId);
       db.execute('COMMIT');
     } catch (_) {
       db.execute('ROLLBACK');
       rethrow;
     }
+  }
+
+  /// [confirmBinding] without its own transaction, for callers inside one.
+  /// Competing candidates are dropped only within the document's project.
+  void applyBindingChoice(String documentId, String paperId) {
+    db.execute(
+      'DELETE FROM paper_bindings WHERE (document_id=? OR paper_id=?) AND NOT (document_id=? AND paper_id=?) AND ambiguous=1 '
+      'AND document_id IN (SELECT id FROM documents WHERE project_id=(SELECT project_id FROM documents WHERE id=?))',
+      [documentId, paperId, documentId, paperId, documentId],
+    );
+    db.execute(
+      "UPDATE paper_bindings SET ambiguous=0,method=method||'+manual' WHERE document_id=? AND paper_id=? AND method NOT LIKE '%+manual'",
+      [documentId, paperId],
+    );
   }
 
   /// Points a note at a research record of its document's project, or
