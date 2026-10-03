@@ -128,7 +128,15 @@ class ResearchExchange {
 
   /// SQL conditions, over an `entries` row aliased `e`, under which a record
   /// is cited and must neither change under the same revision nor be dropped.
-  static const _citedBy = ['e.id IN (SELECT evidence_id FROM outline)'];
+  static const _citedBy = [
+    'e.id IN (SELECT evidence_id FROM outline)',
+    // A plan a generated task was built from (see taskFromExperiment).
+    "e.kind='experiments' AND EXISTS (SELECT 1 FROM tasks t "
+        'WHERE t.project_id=e.project_id '
+        "AND json_extract(t.spec,'\$.source.kind')='experiments' "
+        "AND json_extract(t.spec,'\$.source.id')=json_extract(e.data,'\$.id') "
+        "AND json_extract(t.spec,'\$.source.rev')=json_extract(e.data,'\$.rev'))",
+  ];
   static final _cited = _citedBy.map((c) => '($c)').join(' OR ');
   static final _citedSql = 'SELECT 1 FROM entries e WHERE e.id=? AND ($_cited)';
 
@@ -675,7 +683,10 @@ class ResearchExchange {
       } else {
         throw const FormatException('Result ZIP must contain one result.json');
       }
-      final data = WorkbenchStore.decode(await result.readAsString());
+      final data = WorkbenchStore.decode(await result.readAsString())
+        // Research assessments and export bookkeeping are made in this
+        // workbench, never taken from a result package.
+        ..removeWhere((k, _) => _localRunKeys.contains(k));
       final id = data['runId'],
           taskId = data['taskId'],
           revision = data['taskRevision'],
