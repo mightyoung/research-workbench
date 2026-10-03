@@ -275,6 +275,140 @@ void main() {
     expect(report, contains('来源记录：[claims/c1@2] ${claim.id}'));
   });
 
+  test(
+    'refresh from a ZIP with a top-level folder keeps notes on the same files',
+    () async {
+      final project = await exchange.importResearch(write(skillProject()).path);
+      final pdf = store.documents(project.id).firstWhere((d) => d.isPdf);
+      store.saveNote(pdf.id, 'p. 1', 'directory first');
+      final archive = Archive();
+      skillProject().forEach((rel, text) {
+        final bytes = utf8.encode(text);
+        archive.addFile(ArchiveFile('proj/$rel', bytes.length, bytes));
+      });
+      final zip = File(p.join(temp.path, 'proj.zip'))
+        ..writeAsBytesSync(ZipEncoder().encode(archive));
+      await exchange.importResearch(zip.path, intoProjectId: project.id);
+      final docs = store.documents(project.id);
+      expect(docs.where((d) => d.isPdf).single.id, pdf.id);
+      expect(
+        docs.firstWhere((d) => d.id == pdf.id).relativePath,
+        p.join('proj', 'related_work', 'p1', 'versions', 'v1', 'paper.pdf'),
+      );
+      expect(store.notes(pdf.id).single.text, 'directory first');
+      expect(
+        store.bindings(project.id).map((b) => b.documentId),
+        contains(pdf.id),
+      );
+    },
+  );
+
+  test('a changed file kept for its notes keeps its binding', () async {
+    final project = await exchange.importResearch(write(skillProject()).path);
+    final md = store
+        .documents(project.id)
+        .firstWhere((d) => d.relativePath.endsWith('notes.md'));
+    store.saveNote(md.id, '', 'written on the first version');
+    final files = skillProject()
+      ..['related_work/acquired/h/snap/notes.md'] = '$skillMd changed';
+    await exchange.importResearch(
+      write(files, 'proj2').path,
+      intoProjectId: project.id,
+    );
+    final versions = store
+        .documents(project.id)
+        .where((d) => d.relativePath.endsWith('notes.md'))
+        .toList();
+    expect(versions, hasLength(2));
+    final bound = {for (final b in store.bindings(project.id)) b.documentId};
+    expect(bound, containsAll(versions.map((d) => d.id)));
+    final drafts = await exchange.exportClaimDrafts(project.id, [
+      store.notes(md.id).single.id,
+    ], p.join(temp.path, 'out'));
+    expect(drafts.skipped, isEmpty);
+  });
+
+  test(
+    'manual binding choices survive a refresh with the same ambiguity',
+    () async {
+      final files = skillProject()
+        ..['research/papers.jsonl'] =
+            '${skillProject()['research/papers.jsonl']}${jsonEncode({'schema_version': 2, 'id': 'p1-dup', 'rev': 1, 'source_id': 's1', 'source_rev': 1, 'arxiv_id': '2301.00001', 'version': 'v1', 'title': '重复登记'})}\n';
+      final dir = write(files);
+      final project = await exchange.importResearch(dir.path);
+      final pdf = store.documents(project.id).firstWhere((d) => d.isPdf);
+      expect(
+        store
+            .bindings(project.id)
+            .where((b) => b.documentId == pdf.id)
+            .every((b) => b.ambiguous),
+        isTrue,
+      );
+      store.confirmBinding(pdf.id, 'p1-v1');
+      await exchange.importResearch(dir.path, intoProjectId: project.id);
+      final left = store
+          .bindings(project.id)
+          .where((b) => b.documentId == pdf.id)
+          .single;
+      expect(
+        (left.paperId, left.ambiguous, left.method),
+        ('p1-v1', false, 'arxiv_manifest+manual'),
+      );
+    },
+  );
+
+  test('confirming a binding leaves other projects alone', () async {
+    final a = await exchange.importResearch(write(skillProject(), 'a').path);
+    final b = await exchange.importResearch(write(skillProject(), 'b').path);
+    String docOf(String project) => store.documents(project).first.id;
+    for (final project in [a.id, b.id]) {
+      for (final paper in ['x', 'y']) {
+        store.insertBinding(
+          PaperBinding(
+            documentId: docOf(project),
+            paperId: paper,
+            paperRev: 1,
+            method: 'arxiv_manifest',
+            hashOk: true,
+            ambiguous: true,
+          ),
+        );
+      }
+    }
+    store.confirmBinding(docOf(a.id), 'y');
+    expect(
+      store
+          .bindings(b.id)
+          .where((x) => x.documentId == docOf(b.id) && x.ambiguous)
+          .map((x) => x.paperId),
+      unorderedEquals(['x', 'y']),
+    );
+  });
+
+  test(
+    'a cited row among identical duplicates does not block a refresh',
+    () async {
+      final files = skillProject();
+      final lines = files['research/claims.jsonl']!.trim().split('\n');
+      files['research/claims.jsonl'] = '${[...lines, lines.last].join('\n')}\n';
+      final project = await exchange.importResearch(write(files).path);
+      final copies = store
+          .entries(project.id, kind: 'claims')
+          .where((e) => revOf(e) == 2)
+          .toList();
+      expect(copies, hasLength(2));
+      store.addOutline(project.id, '结果', copies.last.id);
+      await exchange.importResearch(
+        write(skillProject(), 'once').path,
+        intoProjectId: project.id,
+      );
+      final left = store
+          .entries(project.id, kind: 'claims')
+          .where((e) => revOf(e) == 2);
+      expect(left.single.id, copies.last.id);
+    },
+  );
+
   test('confirmBinding resolves ambiguity by user choice', () async {
     final project = await exchange.importResearch(write(skillProject()).path);
     final doc = store.documents(project.id).first.id;
