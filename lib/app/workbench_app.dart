@@ -743,7 +743,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     'opportunities',
                     'experiments',
                   }.contains(k) ||
-                  presentKinds.contains(k),
+                  presentKinds.contains(k) ||
+                  // Keep the active filter visible after a project switch.
+                  k == entryKind,
             ),
             'documents',
           ])
@@ -773,7 +775,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     : Icons.description_outlined,
               ),
               title: Text(d.title),
-              subtitle: Text(d.relativePath),
+              subtitle: Text(
+                docs.lastWhere((o) => o.relativePath == d.relativePath) == d
+                    ? d.relativePath
+                    : '${d.relativePath} · 旧版本（保留精读笔记）',
+              ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => openDocument(d),
             ),
