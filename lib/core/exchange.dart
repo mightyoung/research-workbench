@@ -125,6 +125,19 @@ class ResearchExchange {
     }
   }
 
+  /// Finds whether a local record is cited as evidence (`?1` = local ID).
+  static const _citedSql = 'SELECT 1 FROM outline WHERE evidence_id=?1';
+
+  /// Key-order-independent JSON, for comparing record content.
+  static String _canonical(Object? value) => jsonEncode(switch (value) {
+    Map m => {
+      for (final k in m.keys.map((k) => '$k').toList()..sort())
+        k: jsonDecode(_canonical(m[k])),
+    },
+    List l => [for (final v in l) jsonDecode(_canonical(v))],
+    _ => value,
+  });
+
   /// Identifies a source record across re-imports: `id`+`rev` when present,
   /// otherwise the record content.
   static String _entryKey(String kind, Map<String, dynamic> data) =>
@@ -154,8 +167,10 @@ class ResearchExchange {
             .basename(directoryOrZipPath)
             .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
     final oldEntries = <String, List<String>>{};
+    final oldData = <String, Map<String, dynamic>>{};
     for (final e in store.entries(id)) {
       oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
+      oldData[e.id] = e.data;
     }
     final oldDocs = {for (final d in store.documents(id)) d.relativePath: d.id};
     store.db.execute('BEGIN');
@@ -240,9 +255,19 @@ class ResearchExchange {
                   orElse: () => null,
                 );
             if (reuse != null) {
+              final localId = reuse.removeAt(0);
+              // A revision is immutable once cited: silently rewriting it
+              // would change evidence the user already linked.
+              if (_canonical(oldData[localId]) != _canonical(data) &&
+                  store.db.select(_citedSql, [localId]).isNotEmpty) {
+                throw FormatException(
+                  '$relative 中的 ${data['id']} 修订 ${data['rev']} 内容已改变但修订号未变，'
+                  '且已被引用；请在 research-workflow 中新增修订后再导入',
+                );
+              }
               store.db.execute(
                 'UPDATE entries SET kind=?,title=?,data=? WHERE id=?',
-                [kind, recordTitle, jsonEncode(data), reuse.removeAt(0)],
+                [kind, recordTitle, jsonEncode(data), localId],
               );
             } else {
               store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [

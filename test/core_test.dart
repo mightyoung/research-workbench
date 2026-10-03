@@ -448,6 +448,41 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     expect(after.kind, 'tensions');
   });
 
+  test('cited records cannot change content under the same revision', () async {
+    final source = Directory(p.join(temp.path, 'mutating'))..createSync();
+    final claims = File(p.join(source.path, 'claims.jsonl'));
+    String lines(String cited, String other) =>
+        '${jsonEncode({'id': 'c1', 'rev': 1, 'statement': cited})}\n'
+        '${jsonEncode({'id': 'c2', 'rev': 1, 'statement': other})}\n';
+    claims.writeAsStringSync(lines('original', 'draft'));
+    final project = await exchange.importResearch(source.path);
+    final c1 = store
+        .entries(project.id)
+        .firstWhere((e) => e.data['id'] == 'c1');
+    store.addOutline(project.id, 'Cited', c1.id);
+
+    claims.writeAsStringSync(lines('original', 'typo fixed'));
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    String statement(String id) => store
+        .entries(project.id)
+        .firstWhere((e) => e.data['id'] == id)
+        .data['statement'];
+    expect(statement('c2'), 'typo fixed');
+
+    claims.writeAsStringSync(lines('silently rewritten', 'typo fixed'));
+    await expectLater(
+      exchange.importResearch(source.path, intoProjectId: project.id),
+      throwsA(
+        isA<FormatException>().having(
+          (e) => e.message,
+          'message',
+          contains('c1'),
+        ),
+      ),
+    );
+    expect(statement('c1'), 'original');
+  });
+
   test('existing v3 reading notes gain empty page and quote fields', () {
     final root = p.join(temp.path, 'v3-notes');
     Directory(root).createSync();
