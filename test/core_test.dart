@@ -380,6 +380,7 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     're-import keeps outline-referenced records that left the source',
     () async {
       final source = Directory(p.join(temp.path, 'shrinking'))..createSync();
+      File(p.join(source.path, 'README.md')).writeAsStringSync('# Kept');
       final claims = File(p.join(source.path, 'claims.jsonl'))
         ..writeAsStringSync('${jsonEncode({'title': 'no id'})}\n');
       final project = await exchange.importResearch(source.path);
@@ -391,6 +392,41 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       await expectLater(
         exchange.importResearch(source.path, intoProjectId: 'missing'),
         throwsStateError,
+      );
+    },
+  );
+
+  test(
+    'refresh from empty or non-research material leaves project intact',
+    () async {
+      final source = Directory(p.join(temp.path, 'real'))..createSync();
+      File(p.join(source.path, 'README.md')).writeAsStringSync('# Real');
+      File(
+        p.join(source.path, 'claims.jsonl'),
+      ).writeAsStringSync('${jsonEncode({'id': 'c1', 'rev': 1})}\n');
+      final project = await exchange.importResearch(source.path);
+
+      final empty = Directory(p.join(temp.path, 'empty'))..createSync();
+      await expectLater(
+        exchange.importResearch(empty.path, intoProjectId: project.id),
+        throwsFormatException,
+      );
+      final task = store.saveTask(
+        projectId: project.id,
+        title: 't',
+        goal: 'g',
+        spec: {},
+      );
+      final taskZip = await exchange.exportTask(task, temp.path);
+      await expectLater(
+        exchange.importResearch(taskZip, intoProjectId: project.id),
+        throwsFormatException,
+      );
+      expect(store.entries(project.id), hasLength(1));
+      expect(store.documents(project.id).single.relativePath, 'README.md');
+      expect(
+        Directory(p.join(store.rootPath, 'snapshots', 'research')).listSync(),
+        hasLength(1),
       );
     },
   );
