@@ -287,7 +287,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> with TransferFlows {
   );
 
   void findSource(ResearchEntry e) {
-    final all = store.documents(project!.id);
+    final all = currentVersions(store.documents(project!.id));
     final slug = '${e.data['work_id'] ?? ''}';
     final matches = all
         .where((d) => slug.isNotEmpty && d.relativePath.contains('/$slug/'))

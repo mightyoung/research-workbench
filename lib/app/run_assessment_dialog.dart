@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../core/models.dart';
 import '../core/research_kinds.dart';
+import '../core/skill_bridge.dart';
 
 typedef RunAssessmentInput = ({
   String result,
@@ -30,7 +31,10 @@ Future<RunAssessmentInput?> showRunAssessmentDialog(
 ) {
   final old = run.data['workbench_assessment'];
   final prior = old is Map ? old : const {};
-  var result = '${prior['result'] ?? 'inconclusive'}';
+  // An imported result may carry an unsupported value; start from a valid one.
+  var result = runResults.contains(prior['result'])
+      ? prior['result'] as String
+      : 'inconclusive';
   var discriminating = prior['discriminating'] == true;
   final reason = TextEditingController(text: '${prior['reason'] ?? ''}');
   final budget = TextEditingController(

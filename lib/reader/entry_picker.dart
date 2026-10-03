@@ -13,10 +13,16 @@ const _noteTargets = {
   'failures',
 };
 
-/// Current revisions of records a note can point at.
-List<ResearchEntry> noteTargets(List<ResearchEntry> entries) => latestRevisions(
-  entries,
-).where((e) => _noteTargets.contains(e.kind)).toList();
+/// Current revisions of records a note can point at, plus [linked] (the
+/// note's existing target) even when a newer revision has replaced it, so the
+/// picker never shows "不关联" for a hidden link.
+List<ResearchEntry> noteTargets(List<ResearchEntry> entries, {String? linked}) {
+  final current = latestRevisions(
+    entries,
+  ).where((e) => _noteTargets.contains(e.kind)).toList();
+  final kept = entries.where((e) => e.id == linked).firstOrNull;
+  return [...current, if (kept != null && !current.contains(kept)) kept];
+}
 
 String entryLabel(ResearchEntry e) =>
     '${recordKinds[e.kind] ?? e.kind} · ${e.title}';

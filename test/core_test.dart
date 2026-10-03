@@ -368,9 +368,11 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       expect(latest.data['rev'], 2);
       final docs = store.documents(project.id);
       expect(docs.map((d) => d.relativePath).toSet(), {'paper.md', 'new.md'});
-      final paper = docs.firstWhere((d) => d.relativePath == 'paper.md');
-      expect(paper.id, doc.id);
-      expect(File(paper.absolutePath).readAsStringSync(), '# v2');
+      // The noted v1 stays readable; v2 arrives as a new version.
+      final papers = docs.where((d) => d.relativePath == 'paper.md').toList();
+      expect(papers.first.id, doc.id);
+      expect(File(papers.first.absolutePath).readAsStringSync(), '# v1');
+      expect(File(papers.last.absolutePath).readAsStringSync(), '# v2');
       expect(store.notes(doc.id).single.text, 'keep me');
       expect(store.outline(project.id).single['evidence_id'], c1.id);
     },
@@ -431,6 +433,23 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     },
   );
 
+  test('a genuine other record is not taken over by a new claim', () async {
+    final source = Directory(p.join(temp.path, 'misc'))..createSync();
+    File(p.join(source.path, 'misc.jsonl')).writeAsStringSync(
+      '${jsonEncode({'id': 'x', 'rev': 1, 'note': 'misc'})}\n',
+    );
+    final project = await exchange.importResearch(source.path);
+    final misc = store.entries(project.id).single;
+    store.addOutline(project.id, 'Cited', misc.id);
+    File(p.join(source.path, 'claims.jsonl')).writeAsStringSync(
+      '${jsonEncode({'id': 'x', 'rev': 1, 'statement': 'claim'})}\n',
+    );
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    final entries = store.entries(project.id);
+    expect(entries.firstWhere((e) => e.id == misc.id).kind, 'other');
+    expect(entries.where((e) => e.kind == 'claims'), hasLength(1));
+  });
+
   test('re-import reclassifies legacy other rows in place', () async {
     final source = Directory(p.join(temp.path, 'legacy'))..createSync();
     final tension = {'id': 't1', 'rev': 1, 'observation': 'state leak'};
@@ -446,6 +465,126 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     final after = store.entries(project.id).single;
     expect(after.id, entry.id);
     expect(after.kind, 'tensions');
+  });
+
+  test('cited records cannot change content under the same revision', () async {
+    final source = Directory(p.join(temp.path, 'mutating'))..createSync();
+    final claims = File(p.join(source.path, 'claims.jsonl'));
+    String lines(String cited, String other) =>
+        '${jsonEncode({'id': 'c1', 'rev': 1, 'statement': cited})}\n'
+        '${jsonEncode({'id': 'c2', 'rev': 1, 'statement': other})}\n';
+    claims.writeAsStringSync(lines('original', 'draft'));
+    final project = await exchange.importResearch(source.path);
+    final c1 = store
+        .entries(project.id)
+        .firstWhere((e) => e.data['id'] == 'c1');
+    store.addOutline(project.id, 'Cited', c1.id);
+
+    claims.writeAsStringSync(lines('original', 'typo fixed'));
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    String statement(String id) => store
+        .entries(project.id)
+        .firstWhere((e) => e.data['id'] == id)
+        .data['statement'];
+    expect(statement('c2'), 'typo fixed');
+
+    claims.writeAsStringSync(lines('silently rewritten', 'typo fixed'));
+    await expectLater(
+      exchange.importResearch(source.path, intoProjectId: project.id),
+      throwsA(
+        isA<FormatException>().having(
+          (e) => e.message,
+          'message',
+          contains('c1'),
+        ),
+      ),
+    );
+    expect(statement('c1'), 'original');
+  });
+
+  test(
+    'a changed document keeps the version its notes were written on',
+    () async {
+      final source = Directory(p.join(temp.path, 'versions'))..createSync();
+      final noted = File(p.join(source.path, 'noted.md'))
+        ..writeAsStringSync('v1');
+      final plain = File(p.join(source.path, 'plain.md'))
+        ..writeAsStringSync('v1');
+      final project = await exchange.importResearch(source.path);
+      final docs = store.documents(project.id);
+      final notedDoc = docs.firstWhere((d) => d.relativePath == 'noted.md');
+      final plainDoc = docs.firstWhere((d) => d.relativePath == 'plain.md');
+      store.saveNote(notedDoc.id, 'p.1', 'about v1', quote: 'v1');
+
+      noted.writeAsStringSync('v2');
+      plain.writeAsStringSync('v2');
+      await exchange.importResearch(source.path, intoProjectId: project.id);
+      final after = store.documents(project.id);
+      final notedVersions = after.where((d) => d.relativePath == 'noted.md');
+      expect(notedVersions, hasLength(2));
+      expect(
+        File(
+          notedVersions.firstWhere((d) => d.id == notedDoc.id).absolutePath,
+        ).readAsStringSync(),
+        'v1',
+      );
+      expect(notedVersions.last.id, isNot(notedDoc.id));
+      expect(File(notedVersions.last.absolutePath).readAsStringSync(), 'v2');
+      final plainAfter = after.singleWhere((d) => d.relativePath == 'plain.md');
+      expect(plainAfter.id, plainDoc.id);
+      expect(File(plainAfter.absolutePath).readAsStringSync(), 'v2');
+
+      await exchange.importResearch(source.path, intoProjectId: project.id);
+      expect(
+        store.documents(project.id).where((d) => d.relativePath == 'noted.md'),
+        hasLength(2),
+        reason: 'an unchanged refresh adds no further versions',
+      );
+    },
+  );
+
+  test('id-less records keep identity when only key order changes', () async {
+    final source = Directory(p.join(temp.path, 'order'))..createSync();
+    final claims = File(p.join(source.path, 'claims.jsonl'))
+      ..writeAsStringSync('{"title":"t","statement":"s"}\n');
+    final project = await exchange.importResearch(source.path);
+    final before = store.entries(project.id).single.id;
+    claims.writeAsStringSync('{"statement":"s","title":"t"}\n');
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    expect(store.entries(project.id).single.id, before);
+
+    final latest = currentVersions(store.documents(project.id));
+    expect(latest, isEmpty);
+    ResearchDocument doc(String id, String path) => ResearchDocument(
+      id: id,
+      projectId: 'p',
+      relativePath: path,
+      absolutePath: path,
+    );
+    expect(
+      currentVersions([
+        doc('a1', 'a.md'),
+        doc('a2', 'a.md'),
+        doc('b', 'b.md'),
+      ]).map((d) => d.id),
+      ['a2', 'b'],
+    );
+  });
+
+  test('duplicate source revisions are skipped or rejected', () async {
+    final source = Directory(p.join(temp.path, 'dupes'))..createSync();
+    final claims = File(p.join(source.path, 'claims.jsonl'));
+    final a = jsonEncode({'id': 'c1', 'rev': 1, 'statement': 'a'});
+    final b = jsonEncode({'id': 'c1', 'rev': 1, 'statement': 'b'});
+    claims.writeAsStringSync('$a\n$a\n');
+    final project = await exchange.importResearch(source.path);
+    expect(store.entries(project.id), hasLength(1));
+    claims.writeAsStringSync('$a\n$b\n');
+    await expectLater(
+      exchange.importResearch(source.path, intoProjectId: project.id),
+      throwsFormatException,
+    );
+    expect(store.entries(project.id).single.data['statement'], 'a');
   });
 
   test('existing v3 reading notes gain empty page and quote fields', () {

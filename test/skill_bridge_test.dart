@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:research_workbench/app/run_assessment_dialog.dart';
 import 'package:research_workbench/core/exchange.dart';
 import 'package:research_workbench/core/models.dart';
 import 'package:research_workbench/core/skill_bridge.dart';
@@ -130,6 +132,174 @@ void main() {
     expect(actual['execution_state'], 'completed');
     expect(actual['budget_spent'], 2);
     expect(actual['executed_at'], assessed.data['finishedAt']);
+    expect(record['rev'], 1);
+
+    Future<Map<String, dynamic>> exportAgain() async => jsonDecode(
+      File(
+        await ResearchExchange(
+          store,
+        ).exportSkillExperiment(store.runs('p').single, temp.path),
+      ).readAsLinesSync().single,
+    );
+    final same = await exportAgain();
+    expect((same['id'], same['rev']), (record['id'], 1));
+    store.assessRun(
+      run.id,
+      result: 'inconclusive',
+      discriminating: true,
+      reason: 'rechecked: confound remains',
+      budgetSpent: 2,
+    );
+    final corrected = await exportAgain();
+    expect((corrected['id'], corrected['rev']), (record['id'], 2));
+    expect(corrected['actual']['result'], 'inconclusive');
+  });
+
+  test('assessing an imported result keeps re-import idempotent', () async {
+    final task = store.saveTask(
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      spec: {},
+    );
+    final result = File(p.join(temp.path, 'result.json'))
+      ..writeAsStringSync(
+        jsonEncode({
+          'format': 'research-result-v1',
+          'runId': 'run-1',
+          'taskId': task.id,
+          'taskRevision': task.revision,
+          'status': 'completed',
+          'metrics': {'x': 1},
+          'logs': <String>[],
+          'artifacts': <String>[],
+        }),
+      );
+    final exchange = ResearchExchange(store);
+    await exchange.importResult(result.path);
+    store.assessRun(
+      'run-1',
+      result: 'inconclusive',
+      discriminating: false,
+      reason: 'single seed',
+    );
+    final again = await exchange.importResult(result.path);
+    expect(again.data['workbench_assessment'], isNotNull);
+    expect(store.runs('p'), hasLength(1));
+  });
+
+  test('a plan behind a generated task is protected on refresh', () async {
+    final source = Directory(p.join(temp.path, 'plan'))..createSync();
+    final experiments = File(p.join(source.path, 'experiments.jsonl'));
+    String line(String explanation) =>
+        '${jsonEncode({'id': 'e1', 'rev': 1, 'phase': 'planned', 'explanation': explanation})}\n';
+    experiments.writeAsStringSync(line('original'));
+    File(p.join(source.path, 'README.md')).writeAsStringSync('# r');
+    final exchange = ResearchExchange(store);
+    final project = await exchange.importResearch(source.path);
+    final plan = store.entries(project.id).single;
+    final draft = taskFromExperiment(plan);
+    store.saveTask(
+      projectId: project.id,
+      title: draft.title,
+      goal: draft.goal,
+      spec: draft.spec,
+    );
+    experiments.writeAsStringSync(line('rewritten'));
+    await expectLater(
+      exchange.importResearch(source.path, intoProjectId: project.id),
+      throwsFormatException,
+    );
+    experiments.writeAsStringSync('');
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    expect(store.entries(project.id).single.id, plan.id);
+  });
+
+  test('runs sharing an ID prefix export distinct identities', () {
+    final task = ResearchTask(
+      id: 't',
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      revision: 1,
+      spec: taskFromExperiment(plan).spec,
+    );
+    String idFor(String runId) => executedExperiment(
+      task: task,
+      run: ResearchRun(
+        id: runId,
+        taskId: 't',
+        status: 'completed',
+        taskRevision: 1,
+        accepted: false,
+        data: {
+          'metrics': {'x': 1},
+          'finishedAt': '2026-10-03T08:00:00Z',
+          'workbench_assessment': {
+            'result': 'inconclusive',
+            'discriminating': false,
+            'reason': 'r',
+            'budget_spent': 0,
+          },
+        },
+      ),
+      now: DateTime.utc(2026, 10, 3),
+    )['id'];
+    expect(idFor('seed-001-a'), isNot(idFor('seed-001-b')));
+  });
+
+  test('assessments inside a result package are not imported', () async {
+    final task = store.saveTask(
+      projectId: 'p',
+      title: 't',
+      goal: 'g',
+      spec: {},
+    );
+    final result = File(p.join(temp.path, 'with-assessment.json'))
+      ..writeAsStringSync(
+        jsonEncode({
+          'format': 'research-result-v1',
+          'runId': 'run-x',
+          'taskId': task.id,
+          'taskRevision': task.revision,
+          'status': 'failed',
+          'metrics': <String, dynamic>{},
+          'logs': <String>[],
+          'artifacts': <String>[],
+          'workbench_assessment': {'result': 'supporting'},
+        }),
+      );
+    final run = await ResearchExchange(store).importResult(result.path);
+    expect(run.data.containsKey('workbench_assessment'), isFalse);
+  });
+
+  testWidgets('assessment dialog opens despite an unsupported prior value', (
+    tester,
+  ) async {
+    const run = ResearchRun(
+      id: 'r',
+      taskId: 't',
+      status: 'completed',
+      taskRevision: 1,
+      accepted: false,
+      data: {
+        'workbench_assessment': {'result': 'bogus'},
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showRunAssessmentDialog(context, run),
+            child: const Text('open'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(find.text('无定论'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   test('editing outcome data drops the earlier assessment', () {
@@ -216,6 +386,8 @@ void main() {
       'yesterday',
       '2026-10-03T08:00:00',
       '2026-13-40T00:00Z',
+      '2026-10-03T99:99:99Z',
+      '2026-10-03T08:00:00+25:00',
     ]) {
       expect(
         () => record('completed', ok, finishedAt: time),

@@ -544,6 +544,30 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('nested outline section fits a phone screen', (tester) async {
+    final section = store.addSection(projectId, 'A fairly long nested heading');
+    store.updateSection(
+      section.id,
+      heading: section.heading,
+      level: 3,
+      argument: '',
+      support: 'contested',
+    );
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.byType(NavigationDestination).at(4));
+    await settle(tester);
+    expect(find.text('A fairly long nested heading'), findsOneWidget);
+    expect(find.byTooltip('删除段落'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
     await settle(tester);

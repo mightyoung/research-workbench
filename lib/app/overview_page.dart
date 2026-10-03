@@ -31,7 +31,7 @@ class _OverviewPageState extends State<OverviewPage> {
   Widget build(BuildContext context) {
     final p = store.projects().firstWhere((x) => x.id == widget.projectId);
     final entries = latestRevisions(store.entries(p.id));
-    final docs = store.documents(p.id);
+    final docs = currentVersions(store.documents(p.id));
     final readme = docs
         .where((d) => d.relativePath.toLowerCase() == 'readme.md')
         .firstOrNull;

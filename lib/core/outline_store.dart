@@ -53,6 +53,11 @@ extension OutlineStore on WorkbenchStore {
       'UPDATE sections SET heading=?,level=?,argument=?,support=? WHERE id=?',
       [heading.trim(), level, argument.trim(), support, id],
     );
+    // Keep the denormalised heading on evidence links in step.
+    db.execute('UPDATE outline SET heading=? WHERE section_id=?', [
+      heading.trim(),
+      id,
+    ]);
   }
 
   /// Swaps a section with its neighbour; [delta] is -1 (up) or 1 (down).

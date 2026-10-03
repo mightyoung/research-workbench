@@ -401,7 +401,10 @@ class _ReaderPageState extends State<ReaderPage> {
                         child: const Text('关联论文提纲'),
                       ),
                       TextButton(
-                        onPressed: () => _linkEntry(note, targets),
+                        onPressed: () => _linkEntry(
+                          note,
+                          noteTargets(all, linked: note.entryId),
+                        ),
                         child: const Text('关联研究对象'),
                       ),
                     ],
