@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'research_skill.dart';
+import 'skill_bridge.dart';
 import 'store.dart';
 
 class ResearchExchange {
@@ -152,7 +153,73 @@ class ResearchExchange {
     }
   }
 
-  Future<ResearchProject> importResearch(String directoryOrZipPath) async {
+  /// SQL conditions, over an `entries` row aliased `e`, under which a record
+  /// is cited and must neither change under the same revision nor be dropped.
+  static const _citedBy = [
+    'e.id IN (SELECT evidence_id FROM outline)',
+    'e.id IN (SELECT entry_id FROM notes WHERE entry_id IS NOT NULL)',
+    // A plan a generated task was built from (see taskFromExperiment).
+    "e.kind='experiments' AND EXISTS (SELECT 1 FROM tasks t "
+        'WHERE t.project_id=e.project_id '
+        "AND json_extract(t.spec,'\$.source.kind')='experiments' "
+        "AND json_extract(t.spec,'\$.source.id')=json_extract(e.data,'\$.id') "
+        "AND json_extract(t.spec,'\$.source.rev')=json_extract(e.data,'\$.rev'))",
+  ];
+  static final _cited = _citedBy.map((c) => '($c)').join(' OR ');
+  static final _citedSql = 'SELECT 1 FROM entries e WHERE e.id=? AND ($_cited)';
+
+  /// Run data the workbench adds on top of an imported result payload.
+  static const _localRunKeys = {
+    '_snapshotPath',
+    'workbench_assessment',
+    '_skill_export',
+  };
+
+  static Future<bool> _sameBytes(String a, String b) async =>
+      sha256.convert(await File(a).readAsBytes()) ==
+      sha256.convert(await File(b).readAsBytes());
+
+  /// Key-order-independent JSON, for comparing record content.
+  static String _canonical(Object? value) => jsonEncode(switch (value) {
+    Map m => {
+      for (final k in m.keys.map((k) => '$k').toList()..sort())
+        k: jsonDecode(_canonical(m[k])),
+    },
+    List l => [for (final v in l) jsonDecode(_canonical(v))],
+    _ => value,
+  });
+
+  /// Kinds that versions before research-skill support imported as `other`.
+  static const _newlyRecognised = {
+    'sources',
+    'searches',
+    'tensions',
+    'failures',
+    'handoffs',
+  };
+
+  /// Identifies a source record across re-imports: `id`+`rev` when present,
+  /// otherwise the record content.
+  static String _entryKey(String kind, Map<String, dynamic> data) =>
+      data['id'] != null
+      ? '$kind\u0000id:${data['id']}\u0000rev:${data['rev']}'
+      : '$kind\u0000sha:${sha256.convert(utf8.encode(_canonical(data)))}';
+
+  /// Imports a research snapshot. With [intoProjectId] the snapshot refreshes
+  /// that project: records and documents keep their local IDs so notes and
+  /// outline links survive; records gone from the source are dropped unless
+  /// cited (outline, note or generated task), documents unless they carry
+  /// notes. Paper bindings are recomputed on the new snapshot.
+  Future<ResearchProject> importResearch(
+    String directoryOrZipPath, {
+    String? intoProjectId,
+  }) async {
+    final existing = intoProjectId == null
+        ? null
+        : store.projects().where((p) => p.id == intoProjectId).firstOrNull;
+    if (intoProjectId != null && existing == null) {
+      throw StateError('Unknown project');
+    }
     String? root;
     final snapshot = await _snapshot(
       directoryOrZipPath,
@@ -167,21 +234,52 @@ class ResearchExchange {
               };
       },
     );
-    final id = const Uuid().v4();
-    final title = p
-        .basename(directoryOrZipPath)
-        .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final id = existing?.id ?? const Uuid().v4();
+    final title =
+        existing?.title ??
+        p
+            .basename(directoryOrZipPath)
+            .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final oldEntries = <String, List<String>>{};
+    final oldData = <String, Map<String, dynamic>>{};
+    for (final e in store.entries(id)) {
+      oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
+      oldData[e.id] = e.data;
+    }
+    // Newest version per path; older versions kept for their notes stay put.
+    final oldDocs = {for (final d in store.documents(id)) d.relativePath: d};
     store.db.execute('BEGIN');
     try {
-      store.db.execute(
-        'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
-        [id, title, '', ''],
-      );
+      final manifest = File(p.join(snapshot.path, 'manifest.json'));
+      if (await manifest.exists()) {
+        final declared = jsonDecode(await manifest.readAsString());
+        if (declared is Map && declared['format'] == 'research-package-v1') {
+          throw const FormatException('这是任务包或结果包，请用对应的导入入口');
+        }
+      }
+      if (existing == null) {
+        store.db.execute(
+          'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+          [id, title, '', ''],
+        );
+      } else {
+        // Bindings point at document rows; they are recomputed below.
+        store.db.execute(
+          'DELETE FROM paper_bindings WHERE document_id IN '
+          '(SELECT id FROM documents WHERE project_id=?)',
+          [id],
+        );
+      }
       // research-skill bookkeeping, keyed by project-relative POSIX path.
       final documents = <String, (String, String)>{};
       final manifests = <String, Map<String, dynamic>>{};
       final logs = <ResearchEntry>[];
       var v2 = false;
+      // Refreshing deletes what the source no longer has, so material with
+      // nothing recognisable must not reach the cleanup below.
+      var found = 0;
+      // Source key -> location, to report cited revisions whose content changed.
+      final incomingKeys = <String, String>{};
       await for (final entity in snapshot.list(recursive: true)) {
         if (entity is! File) {
           continue;
@@ -193,12 +291,32 @@ class ResearchExchange {
             : null;
         final ext = p.extension(relative).toLowerCase();
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
-          final documentId = const Uuid().v4();
+          found++;
           final hash = sha256.convert(await entity.readAsBytes()).toString();
-          store.db.execute(
-            'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256) VALUES(?,?,?,?,?)',
-            [documentId, id, relative, store.storedPath(entity.path), hash],
-          );
+          final old = oldDocs.remove(relative);
+          // Notes cite a page and quote of the bytes they were written on;
+          // a changed file with notes becomes a new version beside the old.
+          final keepOld =
+              old != null &&
+              store.db.select('SELECT 1 FROM notes WHERE document_id=?', [
+                old.id,
+              ]).isNotEmpty &&
+              old.sha256 != hash &&
+              !await _sameBytes(old.absolutePath, entity.path);
+          final String documentId;
+          if (old != null && !keepOld) {
+            documentId = old.id;
+            store.db.execute(
+              'UPDATE documents SET snapshot_path=?,sha256=? WHERE id=?',
+              [store.storedPath(entity.path), hash, documentId],
+            );
+          } else {
+            documentId = const Uuid().v4();
+            store.db.execute(
+              'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256) VALUES(?,?,?,?,?)',
+              [documentId, id, relative, store.storedPath(entity.path), hash],
+            );
+          }
           if (projectPath != null) documents[projectPath] = (documentId, hash);
         }
         if (projectPath != null && _isArxivManifest(projectPath)) {
@@ -220,7 +338,7 @@ class ResearchExchange {
               : 'other';
           var line = 0;
           for (final text in const LineSplitter().convert(
-            await entity.readAsString(),
+            stripBom(await entity.readAsString()),
           )) {
             line++;
             if (text.trim().isEmpty) {
@@ -238,19 +356,52 @@ class ResearchExchange {
                         data['observation'] ??
                         data['query'] ??
                         data['step'] ??
+                        data['cause'] ??
                         data['name'] ??
                         data['id'] ??
                         '$base:$line')
                     .toString();
-            final entryId = const Uuid().v4();
-            // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
-            store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
-              entryId,
-              id,
-              kind,
-              recordTitle,
-              jsonEncode(data),
-            ]);
+            found++;
+            // Duplicate id+rev rows are all kept and flagged by the revision
+            // view (design §4); each pairs with at most one earlier row.
+            final key = _entryKey(kind, data);
+            // Older imports stored the newly recognised kinds as `other`;
+            // reuse such a row (only when unambiguous) so its local ID and
+            // links survive reclassification.
+            final legacy = _newlyRecognised.contains(kind)
+                ? oldEntries[_entryKey('other', data)]
+                : null;
+            final reuse = (oldEntries[key]?.isNotEmpty ?? false)
+                ? oldEntries[key]
+                : (legacy != null && legacy.length == 1 ? legacy : null);
+            incomingKeys[key] = '$relative 中的 ${data['id']} 修订 ${data['rev']}';
+            // Pair with an old row of identical content, else with an uncited
+            // one: cited revisions are immutable and never rewritten here.
+            var pick = reuse?.indexWhere(
+              (old) => _canonical(oldData[old]) == _canonical(data),
+            );
+            if (reuse != null && pick! < 0) {
+              pick = reuse.indexWhere(
+                (old) => store.db.select(_citedSql, [old]).isEmpty,
+              );
+            }
+            final String entryId;
+            if (reuse != null && pick! >= 0) {
+              entryId = reuse.removeAt(pick);
+              store.db.execute(
+                'UPDATE entries SET kind=?,title=?,data=? WHERE id=?',
+                [kind, recordTitle, jsonEncode(data), entryId],
+              );
+            } else {
+              entryId = const Uuid().v4();
+              store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
+                entryId,
+                id,
+                kind,
+                recordTitle,
+                jsonEncode(data),
+              ]);
+            }
             if (isLog && kind != 'other') {
               logs.add(
                 ResearchEntry(
@@ -266,13 +417,30 @@ class ResearchExchange {
           }
         }
       }
+      if (found == 0) {
+        throw const FormatException('所选材料中没有 Markdown/PDF 文档或 JSONL 研究记录');
+      }
+      for (final MapEntry(key: key, value: ids) in oldEntries.entries) {
+        for (final entryId in ids) {
+          if (store.db.select(_citedSql, [entryId]).isEmpty) {
+            store.db.execute('DELETE FROM entries WHERE id=?', [entryId]);
+          } else if (incomingKeys[key] case final where?) {
+            // The source still has this id+rev, but not the cited content.
+            throw FormatException(
+              '$where 内容已改变但修订号未变，且已被引用；请在 research-workflow 中新增修订后再导入',
+            );
+          }
+        }
+      }
+      for (final doc in oldDocs.values) {
+        store.db.execute(
+          'DELETE FROM documents WHERE id=? AND id NOT IN (SELECT document_id FROM notes)',
+          [doc.id],
+        );
+      }
       var layout = 'generic';
       if (root != null) {
         layout = v2 ? 'research-skill-v2' : 'research-skill-v1';
-        store.db.execute(
-          'UPDATE projects SET layout=?,skill_root=? WHERE id=?',
-          [layout, root, id],
-        );
         if (v2) {
           computeBindings(
             entries: logs,
@@ -281,10 +449,17 @@ class ResearchExchange {
           ).forEach(store.insertBinding);
         }
       }
+      store.db.execute('UPDATE projects SET layout=?,skill_root=? WHERE id=?', [
+        layout,
+        root ?? '',
+        id,
+      ]);
       store.db.execute('COMMIT');
       return ResearchProject(
         id: id,
         title: title,
+        question: existing?.question ?? '',
+        nextStep: existing?.nextStep ?? '',
         layout: layout,
         skillRoot: root ?? '',
       );
@@ -579,6 +754,7 @@ class ResearchExchange {
       'taskId': task.id,
       'taskRevision': task.revision,
       'status': 'completed',
+      'finishedAt': '',
       'metrics': <String, dynamic>{},
       'logs': <String>[],
       'artifacts': <String>[],
@@ -591,7 +767,7 @@ class ResearchExchange {
           const JsonEncoder.withIndent('  ').convert(result),
         ),
         'README.md': utf8.encode(
-          '# ${task.title}\n\n${task.goal}\n\nTask ${task.id}, revision ${task.revision}.\n\nThis package is a specification only. No command runs automatically. Code and data references must be acquired and verified separately.\n\nExecute manually in an approved environment, complete result-template.json, and return it (or a ZIP containing result.json and relative artifacts). Status is a reported execution status, not scientific validation.\n',
+          '# ${task.title}\n\n${task.goal}\n\nTask ${task.id}, revision ${task.revision}.\n\nThis package is a specification only. No command runs automatically. Code and data references must be acquired and verified separately.\n\nExecute manually in an approved environment, complete result-template.json (set finishedAt to the ISO-8601 UTC time the run ended), and return it (or a ZIP containing result.json and relative artifacts). Status is a reported execution status, not scientific validation.\n',
         ),
       },
       destinationDirectory,
@@ -638,6 +814,8 @@ class ResearchExchange {
       'metrics': current.data['metrics'] ?? <String, dynamic>{},
       'logs': current.data['logs'] ?? <String>[],
       'conclusion': current.data['conclusion'] ?? '',
+      if (current.data['finishedAt'] != null)
+        'finishedAt': current.data['finishedAt'],
       'artifacts': artifacts,
     };
     files['result.json'] = utf8.encode(
@@ -664,6 +842,50 @@ class ResearchExchange {
     );
   }
 
+  /// Writes an assessed run as one research-workflow `experiments` JSONL
+  /// line, to append to the skill project's `research/experiments.jsonl`.
+  Future<String> exportSkillExperiment(
+    ResearchRun run,
+    String destinationDirectory,
+  ) async {
+    final task = store.taskRevision(run.taskId, run.taskRevision);
+    if (task == null) throw StateError('Unknown task revision');
+    // Same content keeps its revision; a corrected export appends a new one,
+    // since the skill treats each id+rev as immutable.
+    final now = DateTime.now();
+    String digest(Map<String, dynamic> r) => sha256
+        .convert(utf8.encode(_canonical({...r}..remove('updated_at'))))
+        .toString();
+    final previous = run.data['_skill_export'];
+    final prevRev = previous is Map && previous['rev'] is int
+        ? previous['rev'] as int
+        : 0;
+    final unchanged = executedExperiment(
+      task: task,
+      run: run,
+      now: now,
+      rev: prevRev,
+    );
+    final sameAsBefore =
+        previous is Map && previous['sha256'] == digest(unchanged);
+    final record = sameAsBefore
+        ? unchanged
+        : executedExperiment(task: task, run: run, now: now, rev: prevRev + 1);
+    store.db.execute('UPDATE runs SET data=? WHERE id=?', [
+      jsonEncode({
+        ...run.data,
+        '_skill_export': {'rev': record['rev'], 'sha256': digest(record)},
+      }),
+      run.id,
+    ]);
+    await Directory(destinationDirectory).create(recursive: true);
+    final file = File(
+      p.join(destinationDirectory, 'experiments-${record['id']}.jsonl'),
+    );
+    await file.writeAsString('${jsonEncode(record)}\n', flush: true);
+    return file.path;
+  }
+
   Future<ResearchRun> importResult(String jsonOrZipPath) async {
     final snapshot = await _snapshot(jsonOrZipPath, 'results');
     try {
@@ -682,7 +904,10 @@ class ResearchExchange {
       } else {
         throw const FormatException('Result ZIP must contain one result.json');
       }
-      final data = WorkbenchStore.decode(await result.readAsString());
+      final data = WorkbenchStore.decode(await result.readAsString())
+        // Research assessments and export bookkeeping are made in this
+        // workbench, never taken from a result package.
+        ..removeWhere((k, _) => _localRunKeys.contains(k));
       final id = data['runId'],
           taskId = data['taskId'],
           revision = data['taskRevision'],
@@ -727,9 +952,11 @@ class ResearchExchange {
       }
       final previous = store.db.select('SELECT * FROM runs WHERE id=?', [id]);
       if (previous.isNotEmpty) {
+        // Compare source payloads only; workbench-local annotations differ.
+        Map<String, dynamic> source(Map<String, dynamic> d) =>
+            {...d}..removeWhere((k, _) => _localRunKeys.contains(k));
         final old = WorkbenchStore.decode(previous.first['data']);
-        old.remove('_snapshotPath');
-        if (jsonEncode(old) != jsonEncode(data)) {
+        if (_canonical(source(old)) != _canonical(source(data))) {
           throw const FormatException(
             'Run ID already exists with different contents',
           );
@@ -781,32 +1008,36 @@ class ResearchExchange {
     final out = StringBuffer(
       '# ${project.title}\n\n${project.question}\n\n下一步：${project.nextStep}\n\n',
     );
-    for (final item in store.outline(projectId)) {
-      out.writeln('## ${item['heading']}\n');
-      final evidence = item['evidence_id'];
-      if (entries.containsKey(evidence)) {
-        final entry = entries[evidence]!;
+    String about(ReadingNote note) => note.entryId == null
+        ? ''
+        : '关联研究对象：${entries[note.entryId]?.title ?? note.entryId}\n\n';
+    String evidence(String id) {
+      if (entries[id] case final entry?) {
         // research-skill refs let check-research.py verify freshness.
         final ref = skillRef(entry);
-        out.writeln(
-          '${entry.title}\n\n来源记录：${ref == null ? '' : '$ref '}$evidence\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
-        );
-      } else if (accepted.containsKey(evidence)) {
-        final run = accepted[evidence]!;
-        out.writeln(
-          '执行记录：${run.id}，任务 ${run.taskId} r${run.taskRevision}，状态 ${run.status}\n\n指标：${jsonEncode(run.data['metrics'] ?? {})}\n\n产物：${jsonEncode(run.data['artifacts'] ?? [])}\n\n人工关联为证据；此状态不代表科学结论已验证。\n',
-        );
-      } else if (noteEvidence.containsKey(evidence)) {
-        final (doc, note) = noteEvidence[evidence]!;
-        out.writeln(
-          '精读证据：${note.id}\n\n来源：${doc.relativePath}'
-          '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
-          '${note.locator.isEmpty ? '' : ' · ${note.locator}'}\n\n'
-          '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
-          '${note.text}\n',
-        );
-      } else {
-        out.writeln('待复审或未接纳的证据：$evidence\n');
+        return '${entry.title}\n\n来源记录：${ref == null ? '' : '$ref '}$id\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n';
+      }
+      if (accepted[id] case final run?) {
+        return '执行记录：${run.id}，任务 ${run.taskId} r${run.taskRevision}，状态 ${run.status}\n\n指标：${jsonEncode(run.data['metrics'] ?? {})}\n\n产物：${jsonEncode(run.data['artifacts'] ?? [])}\n\n人工关联为证据；此状态不代表科学结论已验证。\n';
+      }
+      if (noteEvidence[id] case (final doc, final note)) {
+        return '精读证据：${note.id}\n\n来源：${doc.relativePath}'
+            '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
+            '${note.locator.isEmpty ? '' : ' · ${note.locator}'}\n\n'
+            '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
+            '${about(note)}${note.text}\n';
+      }
+      return '待复审或未接纳的证据：$id\n';
+    }
+
+    final links = store.outline(projectId);
+    for (final section in store.sections(projectId)) {
+      out.writeln('${'#' * (section.level + 1)} ${section.heading}\n');
+      if (section.argument.isNotEmpty) out.writeln('${section.argument}\n');
+      out.writeln('证据支持程度：${sectionSupport[section.support]}\n');
+      final cited = links.where((l) => l['section_id'] == section.id).toList();
+      for (final (i, link) in cited.indexed) {
+        out.writeln('**证据 ${i + 1}**\n\n${evidence('${link['evidence_id']}')}');
       }
     }
     out.writeln('## 精读笔记\n');
@@ -816,7 +1047,7 @@ class ResearchExchange {
           '### ${doc.relativePath} · ${note.locator}'
           '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}\n\n'
           '${note.quote.isEmpty ? '' : '> ${note.quote}\n\n'}'
-          '${note.text}\n',
+          '${about(note)}${note.text}\n',
         );
       }
     }

@@ -120,6 +120,28 @@ void main() {
     expect(store.bindings(project.id), hasLength(2));
   });
 
+  test(
+    'refreshing a skill project recomputes bindings and keeps notes',
+    () async {
+      final dir = write(skillProject());
+      final project = await exchange.importResearch(dir.path);
+      final bound = store.bindings(project.id).first;
+      store.saveNote(bound.documentId, 'p.1', 'kept across refresh');
+      final refreshed = await exchange.importResearch(
+        dir.path,
+        intoProjectId: project.id,
+      );
+      expect(refreshed.layout, 'research-skill-v2');
+      expect(store.projects(), hasLength(1));
+      expect(store.bindings(project.id), hasLength(2));
+      expect(
+        store.bindings(project.id).map((b) => b.documentId),
+        contains(bound.documentId),
+      );
+      expect(store.notes(bound.documentId).single.text, 'kept across refresh');
+    },
+  );
+
   test('generic folders keep the previous behaviour', () async {
     final project = await exchange.importResearch(
       write({'notes.md': '# n', 'DataSet/a.md': '# kept'}, 'plain').path,

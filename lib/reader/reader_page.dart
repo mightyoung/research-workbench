@@ -10,6 +10,8 @@ import 'package:pdfrx/pdfrx.dart';
 import '../core/models.dart';
 import '../core/research_skill.dart';
 import '../core/store.dart';
+import 'entry_picker.dart';
+import '../app/outline_link_dialog.dart';
 
 /// Reads the imported snapshot; notes are separate records, never source edits.
 class ReaderPage extends StatefulWidget {
@@ -43,6 +45,7 @@ class _ReaderPageState extends State<ReaderPage> {
   int _page = 1;
   int _pageCount = 0;
   bool _notesVisible = false;
+  String? _entryId;
 
   @override
   void initState() {
@@ -310,6 +313,7 @@ class _ReaderPageState extends State<ReaderPage> {
         quote: _quote.text,
         evidenceKind: _evidenceKind,
         doesNotSupport: _doesNotSupport.text,
+        entryId: _entryId,
       );
       _note.clear();
       _quote.clear();
@@ -329,46 +333,35 @@ class _ReaderPageState extends State<ReaderPage> {
   }
 
   Future<void> _linkNote(ReadingNote note) async {
-    var heading = '研究结果与讨论';
-    final linked = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('关联提纲段落'),
-        content: TextFormField(
-          initialValue: heading,
-          onChanged: (value) => heading = value,
-          decoration: const InputDecoration(labelText: '段落标题'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('关联'),
-          ),
-        ],
-      ),
+    final heading = await linkToOutline(
+      context,
+      widget.store,
+      widget.document.projectId,
+      note.id,
     );
-    if (linked == true && heading.trim().isNotEmpty) {
-      widget.store.addOutline(
-        widget.document.projectId,
-        heading.trim(),
-        note.id,
-      );
-      widget.onChanged?.call();
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('精读证据已关联提纲')));
-      }
+    if (heading == null) return;
+    widget.onChanged?.call();
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('精读证据已关联提纲：$heading')));
     }
+  }
+
+  Future<void> _linkEntry(ReadingNote note, List<ResearchEntry> targets) async {
+    final picked = await pickNoteEntry(context, targets, note.entryId);
+    if (picked == null) return;
+    widget.store.setNoteEntry(note.id, picked.id);
+    widget.onChanged?.call();
+    if (mounted) setState(() {});
   }
 
   Widget _notes() {
     final notes = widget.store.notes(widget.document.id);
     final bound = _binding;
+    final all = widget.store.entries(widget.document.projectId);
+    final targets = noteTargets(all);
+    final byId = {for (final e in all) e.id: e};
     final entries = widget.store.entries(widget.document.projectId).where((
       entry,
     ) {
@@ -481,6 +474,12 @@ class _ReaderPageState extends State<ReaderPage> {
           ),
         ],
         const SizedBox(height: 12),
+        EntryPicker(
+          entries: targets,
+          value: _entryId,
+          onChanged: (v) => setState(() => _entryId = v),
+        ),
+        const SizedBox(height: 12),
         FilledButton.icon(
           onPressed: _saveNote,
           icon: const Icon(Icons.add),
@@ -522,9 +521,23 @@ class _ReaderPageState extends State<ReaderPage> {
                   ],
                   const SizedBox(height: 6),
                   SelectableText(note.text),
-                  TextButton(
-                    onPressed: () => _linkNote(note),
-                    child: const Text('关联论文提纲'),
+                  if (byId[note.entryId] case final linked?)
+                    Text('关联：${entryLabel(linked)}'),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: () => _linkNote(note),
+                        child: const Text('关联论文提纲'),
+                      ),
+                      TextButton(
+                        onPressed: () => _linkEntry(
+                          note,
+                          noteTargets(all, linked: note.entryId),
+                        ),
+                        child: const Text('关联研究对象'),
+                      ),
+                    ],
                   ),
                 ],
               ),
