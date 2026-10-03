@@ -9,10 +9,15 @@ import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
 import '../core/research_skill.dart';
+import '../core/research_kinds.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
+import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
 import 'skill_panels.dart';
+import 'outline_link_dialog.dart';
+import 'run_assessment_dialog.dart';
+import 'writing_page.dart';
 import 'theme.dart';
 
 class WorkbenchApp extends StatelessWidget {
@@ -149,19 +154,54 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     )) {
       return;
     }
+    final target = await chooseImportTarget(path);
+    if (target == null) return;
     await action(() async {
       final exchange = ResearchExchange(store);
-      final p = await exchange.importResearch(path);
+      final p = await exchange.importResearch(
+        path,
+        intoProjectId: target.isEmpty ? null : target,
+      );
       projectId = p.id;
       section = 0;
       final (files, bytes) = exchange.lastSkipped;
       message(
-        p.isSkill
-            ? '已导入 research-skill 项目 ${p.title}'
-                  '${files == 0 ? '' : '；跳过 $files 个文件（${(bytes / 1048576).toStringAsFixed(1)} MiB：源码包、数据集、权重等）'}'
-            : '已导入 ${p.title}',
+        '${target.isEmpty ? '已导入' : '已更新'}'
+        '${p.isSkill ? ' research-skill 项目' : ''} ${p.title}'
+        '${target.isEmpty ? '' : '，笔记与提纲保留'}'
+        '${files == 0 ? '' : '；跳过 $files 个文件（${(bytes / 1048576).toStringAsFixed(1)} MiB：源码包、数据集、权重等）'}',
       );
     });
+  }
+
+  /// Returns a project ID to refresh, '' for a new project, or null to cancel.
+  Future<String?> chooseImportTarget(String path) async {
+    final name = p
+        .basename(path)
+        .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final projects = store.projects()
+      ..sort((a, b) => (b.title == name ? 1 : 0) - (a.title == name ? 1 : 0));
+    if (projects.isEmpty) return '';
+    return showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('导入到哪个项目？'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, ''),
+            child: Text('新建项目「$name」'),
+          ),
+          for (final project in projects)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, project.id),
+              child: Text(
+                '更新「${project.title}」${project.title == name ? ' · 同名' : ''}'
+                '\n保留笔记、任务、运行与提纲',
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   String get exportDirectory => p.join(store.rootPath, 'exports');
@@ -209,7 +249,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     });
   }
 
-  Future<void> importLanFile(String path, String kind) async {
+  Future<bool> importLanFile(String path, String kind) async {
     final exchange = ResearchExchange(store);
     if (kind == 'task') {
       final task = await exchange.importTask(path);
@@ -229,7 +269,12 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         });
       }
     } else if (kind == 'research') {
-      final project = await exchange.importResearch(path);
+      final target = await chooseImportTarget(path);
+      if (target == null) return false;
+      final project = await exchange.importResearch(
+        path,
+        intoProjectId: target.isEmpty ? null : target,
+      );
       if (mounted) {
         setState(() {
           projectId = project.id;
@@ -240,6 +285,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       throw const FormatException('Unknown received content type');
     }
     message('局域网文件已导入本机资料库。');
+    return true;
   }
 
   Future<void> openLan() async {
@@ -494,7 +540,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   Widget overview() {
     final p = project!;
     final entries = store.entries(p.id);
-    final docs = store.documents(p.id);
+    final docs = currentVersions(store.documents(p.id));
     final readme = docs
         .where((d) => d.relativePath.toLowerCase() == 'readme.md')
         .firstOrNull;
@@ -735,7 +781,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         children: [
           for (final kind in [
             ...skillKinds.where(
-              (k) => p.isSkill || skillKindLabels.keys.take(4).contains(k),
+              (k) =>
+                  p.isSkill ||
+                  skillKindLabels.keys.take(4).contains(k) ||
+                  // Keep the active filter visible after a project switch.
+                  k == entryKind,
             ),
             'documents',
           ])
@@ -762,7 +812,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                     : Icons.description_outlined,
               ),
               title: Text(d.title),
-              subtitle: Text(d.relativePath),
+              subtitle: Text(
+                docs.lastWhere((o) => o.relativePath == d.relativePath) == d
+                    ? d.relativePath
+                    : '${d.relativePath} · 旧版本（保留精读笔记）',
+              ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => openDocument(d),
             ),
@@ -794,15 +848,43 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   String entrySubtitle(ResearchEntry e) {
     final d = e.data;
     return [
+      if (d['rev'] != null) 'r${d['rev']}',
+      for (final f in summaryFields) displayValue(fieldValue(d, f)),
       d['year'],
       d['venue'],
       d['reading_depth'],
       d['review_status'],
       d['status'],
-      d['phase'],
       d['basis'],
-    ].where((v) => v != null).join(' · ');
+    ].where((v) => v != null && v != '').join(' · ');
   }
+
+  /// Labelled judgment fields of a record kind that are present in [d].
+  List<Widget> judgment(String kind, Map<String, dynamic> d) => [
+    for (final MapEntry(key: path, value: label)
+        in (judgmentFields[kind] ?? const <String, String>{}).entries)
+      if (displayValue(fieldValue(d, path)).isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SelectableText.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: '$label　',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                TextSpan(text: displayValue(fieldValue(d, path))),
+              ],
+            ),
+          ),
+        ),
+  ];
+
+  List<(ResearchDocument, ReadingNote)> notesAbout(String entryId) => [
+    for (final doc in store.documents(project!.id))
+      for (final note in store.notes(doc.id))
+        if (note.entryId == entryId) (doc, note),
+  ];
 
   Future<void> showEntry(ResearchEntry e, {RevisionGroup? group}) async {
     final d = e.data;
@@ -841,6 +923,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                   const SizedBox(height: 12),
                 ],
                 if (d['statement'] != null) SelectableText('${d['statement']}'),
+                const SizedBox(height: 8),
+                ...judgment(e.kind, d),
                 if (d['locator'] != null)
                   SelectableText(
                     '证据定位\n${const JsonEncoder.withIndent('  ').convert(d['locator'])}',
@@ -849,6 +933,29 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                   SelectableText(
                     'DOI / 原文地址\n${d['doi'] ?? ''}\n${d['url'] ?? ''}',
                   ),
+                if (notesAbout(e.id) case final linked
+                    when linked.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text('相关精读笔记 (${linked.length})'),
+                  for (final (doc, note) in linked)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      leading: const Icon(Icons.format_quote_outlined),
+                      title: Text(
+                        note.quote.isEmpty ? note.text : '“${note.quote}”',
+                      ),
+                      subtitle: Text(
+                        '${doc.relativePath}'
+                        '${note.pageNumber == null ? '' : ' · p. ${note.pageNumber}'}'
+                        '${note.quote.isEmpty ? '' : ' · ${note.text}'}',
+                      ),
+                      onTap: () {
+                        Navigator.pop(c);
+                        openDocument(doc);
+                      },
+                    ),
+                ],
                 const SizedBox(height: 12),
                 const Text('原始记录（状态按来源保留）'),
                 const SizedBox(height: 8),
@@ -874,6 +981,14 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             },
             child: const Text('关联论文提纲'),
           ),
+          if (e.kind == 'experiments' && d['phase'] != 'executed')
+            OutlinedButton(
+              onPressed: () {
+                Navigator.pop(c);
+                createTaskFromPlan(e);
+              },
+              child: const Text('生成实验任务'),
+            ),
           FilledButton(
             onPressed: () {
               Navigator.pop(c);
@@ -887,7 +1002,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   }
 
   void findSource(ResearchEntry e) {
-    final all = store.documents(project!.id);
+    final all = currentVersions(store.documents(project!.id));
     final bound = store
         .bindings(project!.id)
         .where((b) => !b.ambiguous && b.paperId == sourceIdOf(e))
@@ -945,6 +1060,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(t.goal),
+              if (t.spec['source'] case {'id': final id, 'rev': final rev})
+                Text('来源实验计划：$id · r$rev'),
               const SizedBox(height: 8),
               SelectableText(
                 '任务 ID：${t.id}',
@@ -1144,6 +1261,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                 for (final key in metricKeys)
                   row('指标 · $key', (run) => metric(run, key)),
                 row('结论', (run) => '${run.data['conclusion'] ?? '—'}'),
+                row('研究结论', (run) {
+                  final result = fieldValue(
+                    run.data,
+                    'workbench_assessment.result',
+                  );
+                  return result == null ? '未评估' : displayValue(result);
+                }),
                 row(
                   '产物数',
                   (run) => '${(run.data['artifacts'] as List?)?.length ?? 0}',
@@ -1184,6 +1308,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                 '${run.status} · 任务 r${run.taskRevision} · ${run.accepted ? '已关联证据' : '待接纳'}',
               ),
               SelectableText('Task ID：${run.taskId}'),
+              if (assessmentSummary(run) case final summary?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: SelectableText(summary),
+                ),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 10,
@@ -1221,6 +1350,25 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                       onPressed: () => linkEvidence(run.id),
                       child: const Text('关联论文提纲'),
                     ),
+                  if (run.status == 'completed' || run.status == 'failed')
+                    OutlinedButton(
+                      onPressed: () => assessRun(run),
+                      child: const Text('评估研究结论'),
+                    ),
+                  if (run.data['workbench_assessment'] != null &&
+                      store
+                              .taskRevision(run.taskId, run.taskRevision)
+                              ?.spec['source'] !=
+                          null)
+                    FilledButton.tonal(
+                      onPressed: () => action(() async {
+                        final path = await ResearchExchange(
+                          store,
+                        ).exportSkillExperiment(run, exportDirectory);
+                        await saveGenerated(path, 'application/x-ndjson');
+                      }),
+                      child: const Text('导出给 research-workflow'),
+                    ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -1238,6 +1386,39 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
       ),
       if (runs.isEmpty) const Text('尚无返回结果。离线任务包内提供结果格式说明。'),
     ]);
+  }
+
+  Future<void> assessRun(ResearchRun run) async {
+    final input = await showRunAssessmentDialog(context, run);
+    if (input == null) return;
+    try {
+      store.assessRun(
+        run.id,
+        result: input.result,
+        discriminating: input.discriminating,
+        reason: input.reason,
+        budgetSpent: input.budgetSpent,
+      );
+      refresh();
+    } on FormatException catch (e) {
+      message('评估未保存：${e.message}');
+    }
+  }
+
+  void createTaskFromPlan(ResearchEntry plan) {
+    try {
+      final draft = taskFromExperiment(plan);
+      final task = store.saveTask(
+        projectId: plan.projectId,
+        title: draft.title,
+        goal: draft.goal,
+        spec: draft.spec,
+      );
+      setState(() => section = 2);
+      message('已生成任务 ${task.title}，可编辑补充代码、数据与环境');
+    } on FormatException catch (e) {
+      message('未生成任务：${e.message}');
+    }
   }
 
   Future<void> exportRun(
@@ -1359,111 +1540,30 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   }
 
   Future<void> linkEvidence(String id) async {
-    final heading = TextEditingController(text: '研究结果与讨论');
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('关联提纲段落'),
-        content: TextField(
-          controller: heading,
-          decoration: const InputDecoration(labelText: '段落标题'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(c),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(c, true),
-            child: const Text('关联'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true && heading.text.trim().isNotEmpty) {
-      store.addOutline(project!.id, heading.text.trim(), id);
-      refresh();
-      message('已关联论文提纲');
-    }
+    final heading = await linkToOutline(context, store, project!.id, id);
+    if (heading == null) return;
+    refresh();
+    message('已关联论文提纲：$heading');
   }
 
   Widget writing() {
     final p = project!;
-    final outline = store.outline(p.id);
-    final entries = store.entries(p.id);
-    final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
-      for (final doc in store.documents(p.id))
-        for (final note in store.notes(doc.id)) note.id: (doc, note),
-    };
-    return layout([
-      card(
-        '证据驱动的论文提纲',
-        const Text('从主张详情或已接纳运行中选择证据，关联到段落。导出报告保留证据来源和状态，方便继续写作与复审。'),
-      ),
-      Wrap(
-        spacing: 12,
-        runSpacing: 8,
-        children: [
-          FilledButton.icon(
-            onPressed: () async {
-              await action(() async {
-                final path = await ResearchExchange(
-                  store,
-                ).exportReport(p.id, exportDirectory);
-                await saveGenerated(path, 'text/markdown');
-              });
-            },
-            icon: const Icon(Icons.description_outlined),
-            label: const Text('导出 Markdown 研究报告'),
-          ),
-          OutlinedButton(
-            onPressed: () => setState(() {
-              section = 1;
-              entryKind = 'claims';
-            }),
-            child: const Text('选择主张与证据'),
-          ),
-        ],
-      ),
-      ...outline.map((row) {
-        final id = '${row['evidence_id'] ?? row['evidenceId'] ?? ''}';
-        final e = entries.where((e) => e.id == id).firstOrNull;
-        final note = noteEvidence[id];
-        return card(
-          '${row['heading']}',
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                e?.title ??
-                    (note == null
-                        ? '运行结果 / 产物'
-                        : '精读证据 · ${note.$1.relativePath}'
-                              '${note.$2.pageNumber == null ? '' : ' · p. ${note.$2.pageNumber}'}'),
-              ),
-              SelectableText(id),
-              if (note != null && note.$2.quote.isNotEmpty)
-                SelectableText('“${note.$2.quote}”'),
-              if (e != null)
-                TextButton(
-                  onPressed: () => showEntry(e),
-                  child: const Text('查看证据'),
-                ),
-              if (note != null)
-                TextButton(
-                  onPressed: () => openDocument(note.$1),
-                  child: const Text('打开精读来源'),
-                ),
-              IconButton(
-                tooltip: '复制证据 ID',
-                onPressed: () => Clipboard.setData(ClipboardData(text: id)),
-                icon: const Icon(Icons.copy, size: 18),
-              ),
-            ],
-          ),
-        );
+    return WritingPage(
+      key: ValueKey(p.id),
+      store: store,
+      projectId: p.id,
+      onExportReport: () => action(() async {
+        final path = await ResearchExchange(
+          store,
+        ).exportReport(p.id, exportDirectory);
+        await saveGenerated(path, 'text/markdown');
       }),
-      if (outline.isEmpty) const Text('提纲尚未关联证据。先选择一条主张或一份已接纳结果。'),
-    ]);
+      onPickEvidence: () => setState(() {
+        section = 1;
+        entryKind = 'claims';
+      }),
+      onShowEntry: showEntry,
+      onOpenDocument: openDocument,
+    );
   }
 }

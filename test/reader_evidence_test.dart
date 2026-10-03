@@ -25,6 +25,13 @@ void main() {
       'INSERT INTO documents(id,project_id,relative_path,snapshot_path) VALUES(?,?,?,?)',
       ['document', 'project', 'paper.md', 'paper.md'],
     );
+    store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
+      'claim',
+      'project',
+      'claims',
+      'Cohort claim',
+      '{"id":"c1","rev":1}',
+    ]);
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(
@@ -56,9 +63,14 @@ void main() {
       180,
       scrollable: find.byType(Scrollable).last,
     );
+    await tester.tap(find.text('不关联'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('主张 · Cohort claim').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.text('保存笔记'));
     await tester.pumpAndSettle();
     final note = store.notes('document').single;
+    expect(note.entryId, 'claim');
     expect(note.pageNumber, 5);
     expect(note.quote, 'The final cohort included 42 participants.');
     await tester.scrollUntilVisible(

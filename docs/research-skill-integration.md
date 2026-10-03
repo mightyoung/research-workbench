@@ -99,22 +99,23 @@ v6.5 要求根目录的 `*.md` 和 `experiment/*.md` 用 `[kind/id@rev]` 引用�
 
 **研究 agent 侧的接收**：按 research-skill 现有规则进行，读草稿 → 补全 → 追加 → 运行 `check-research.py`，v6.5 不需要改动。以后可以在 research-skill 增加一个导入草稿的辅助脚本，不在本次范围内。
 
-## 8. 再导入同一项目（第二期）
+## 8. 再导入同一项目（已实现，与原设计不同处见下）
 
 research-skill 会反复运行，工作台需要在不丢失笔记和提纲的前提下接收新一轮结果。
 
-- 导入时由用户明确选择"新建项目"或"更新已有项目 X"，不靠目录名猜测。
-- 每次导入成为该项目的一个新快照，项目记录当前快照；旧快照保留，不删除。
-- **笔记迁移**：新快照里有同相对路径、同 SHA-256 的文档 → 笔记跟过去；同路径但哈希不同 → 跟过去并标"待复核"；找不到 → 留在旧文档上，列入"未迁移笔记"。
-- **提纲迁移**：指向研究记录的提纲项按 `(kind, id, rev)` 在新快照里重新定位。日志只追加，旧修订通常仍在；被引修订已不是最新时显示"有更新修订"，不自动改指向。
-- 论文绑定按第 5 节在新快照上重新计算。
+- 导入时由用户明确选择"新建项目"或"更新已有项目 X"（同名项目排前），不靠目录名猜测。
+- 每次导入复制为新快照，旧快照不删除。未引入 `snapshots` 表：记录和文档在原行上更新，本地 ID 不变。
+- **记录**：按 `(kind, id, rev)`（无 id 时按键序无关的内容哈希）对应旧行并沿用本地 ID，提纲、笔记关联因此不断。被提纲、笔记或"从实验计划生成的任务"引用的记录：同一修订内容改变时拒绝导入（要求追加新修订）；来源中消失时保留。旧版本以 `other` 保存的 sources/searches/tensions/failures/handoffs 在唯一匹配时原地改类。
+- **文档 / 笔记**：同路径文档沿用原行；若内容改变且原文档有精读笔记，保留旧版本（笔记仍对应写它时的字节），新内容另成一个版本，文库标"旧版本（保留精读笔记）"，默认打开流程用最新版本。与原设计"跟过去并标待复核"不同。
+- **防误操作**：没有任何文档或 JSONL 记录、或选中的是任务/结果包时拒绝更新，不进入清理。
+- 论文绑定在新快照上重新计算。
 
 ## 9. 数据库变更
 
 在 `WorkbenchStore._migrations` 末尾追加，不改已发布的迁移：
 
 - 第一期（迁移 5）：`projects.layout`（`generic` / `research-skill-v1` / `research-skill-v2`）；`documents.sha256`；新表 `paper_bindings(document_id, paper_source_id, paper_rev, method, hash_ok)`。修订分组在 Dart 侧计算，不加列。
-- 第二期（迁移 6）：`snapshots(id, project_id, imported_at, source_label)`；`projects.current_snapshot`；`documents.snapshot_id`、`entries.snapshot_id`；`notes.needs_review`。
+- 迁移 6：`notes.entry_id`（笔记关联研究记录）；新表 `sections`（提纲段落：标题、层级、顺序、论述、证据支持程度），`outline.section_id`；已有提纲按标题归并成段落。第 8 节的再导入不需要新表。
 
 ## 10. 测试
 
@@ -130,14 +131,20 @@ research-skill 会反复运行，工作台需要在不丢失笔记和提纲的�
 ## 11. 不做
 
 - 在工作台里编辑或追加 research-skill 日志（机会状态、claim 修订等），这些都经由 research-skill 进行。
-- 工作台任务 / 运行结果与 `experiments.jsonl` 的计划 / 实测互通。v6.5 的 `approval` 和 `provenance` 契约需要单独设计。
 - `searches`、`tensions` 的专门视图，第一期只在通用详情页显示原始字段。
 - PDF 文本提取或引句的自动核验。
 - 自动发现或同步 research-skill 项目目录。
 
-## 12. 已确认的决定（2026-10-03）
+## 12. 实验计划与运行结果互通（已实现）
+
+- 计划阶段的 `experiments` 记录可"生成实验任务"，任务规格固定 `source: {kind, id, rev}`。
+- 运行结束后可单独记录研究结论（支持 / 反驳 / 无定论、能否区分解释、理由、花费），规则与 `check-research.py` 一致；与执行状态、证据接纳分开。
+- "导出给 research-workflow"生成一行 `phase: executed` 的 `experiments` 记录（`plan_ref`、`actual`），由人追加进 `research/experiments.jsonl`；工作台不直接写 `research/`。内容变化的再导出递增 `rev`。
+- 未覆盖：计划上的 `approval` 与运行的 `provenance`（代码提交、命令、输出哈希），`--strict-v2` 下仍会被拒绝。
+
+## 13. 已确认的决定（2026-10-03）
 
 1. 页码：草稿只填 `pdf_page`，`page` 留空由人确认。
 2. 草稿 ID：工作台生成 `c-wb-<8 位十六进制>`，追加方确认不冲突。
 3. 笔记界面：文档已绑定论文时，提供"证据类型"和"不支持的更强结论"两个可选输入。
-4. 分期：第一期为第 2–7、10 节，已实现；第二期为第 8 节再导入。
+4. 分期：第 2–8、10、12 节已实现。

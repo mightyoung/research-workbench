@@ -5,6 +5,8 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'research_skill.dart' show evidenceKinds;
+import 'skill_bridge.dart';
+export 'outline_store.dart';
 
 class WorkbenchStore {
   WorkbenchStore._(this.rootPath, this.db);
@@ -39,6 +41,18 @@ ALTER TABLE notes ADD COLUMN evidence_kind TEXT;
 ALTER TABLE notes ADD COLUMN does_not_support TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(id),paper_id TEXT,paper_rev INTEGER,method TEXT,hash_ok INTEGER,ambiguous INTEGER,PRIMARY KEY(document_id,paper_id));''',
     ),
+    // v6: notes may point at a research record; outline links group into
+    // ordered sections. Existing outline rows become one section per heading.
+    (db) => db.execute('''
+CREATE TABLE IF NOT EXISTS outline(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT,evidence_id TEXT);
+ALTER TABLE notes ADD COLUMN entry_id TEXT;
+CREATE TABLE sections(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),heading TEXT NOT NULL,level INTEGER NOT NULL DEFAULT 1,position INTEGER NOT NULL,argument TEXT NOT NULL DEFAULT '',support TEXT NOT NULL DEFAULT 'unassessed');
+ALTER TABLE outline ADD COLUMN section_id TEXT REFERENCES sections(id);
+INSERT INTO sections(id,project_id,heading,position)
+  SELECT lower(hex(randomblob(16))),project_id,heading,ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY MIN(rowid))
+  FROM outline GROUP BY project_id,heading;
+UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=outline.project_id AND s.heading=outline.heading);
+'''),
   ];
   static int get schemaVersion => _migrations.length;
 
@@ -132,7 +146,7 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
       .toList();
   List<ResearchDocument> documents(String projectId) => db
       .select(
-        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path',
+        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path,rowid',
         [projectId],
       )
       .map(
@@ -199,7 +213,9 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     data: decode(r['data']),
   );
   List<ReadingNote> notes(String documentId) => db
-      .select('SELECT * FROM notes WHERE document_id=?', [documentId])
+      .select('SELECT * FROM notes WHERE document_id=? ORDER BY rowid', [
+        documentId,
+      ])
       .map(
         (r) => ReadingNote(
           id: r['id'],
@@ -210,6 +226,7 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
           quote: r['quoted_text'],
           evidenceKind: r['evidence_kind'],
           doesNotSupport: r['does_not_support'],
+          entryId: r['entry_id'],
         ),
       )
       .toList();
@@ -259,6 +276,20 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     }
   }
 
+  /// Points a note at a research record of its document's project, or
+  /// clears the link with null.
+  void setNoteEntry(String noteId, String? entryId) {
+    if (entryId != null &&
+        db.select(
+          'SELECT 1 FROM notes n JOIN documents d ON d.id=n.document_id '
+          'JOIN entries e ON e.project_id=d.project_id WHERE n.id=? AND e.id=?',
+          [noteId, entryId],
+        ).isEmpty) {
+      throw StateError('Note or research record not found in this project');
+    }
+    db.execute('UPDATE notes SET entry_id=? WHERE id=?', [entryId, noteId]);
+  }
+
   void saveProject(
     String id, {
     required String question,
@@ -276,6 +307,7 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     String quote = '',
     String? evidenceKind,
     String doesNotSupport = '',
+    String? entryId,
   }) {
     if (pageNumber != null && pageNumber < 1) {
       throw const FormatException('Page number must be positive');
@@ -283,19 +315,28 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     if (evidenceKind != null && !evidenceKinds.contains(evidenceKind)) {
       throw FormatException('Unsupported evidence kind: $evidenceKind');
     }
-    db.execute(
-      'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text,evidence_kind,does_not_support) VALUES(?,?,?,?,?,?,?,?)',
-      [
-        const Uuid().v4(),
-        documentId,
-        locator,
-        text,
-        pageNumber,
-        quote.trim(),
-        evidenceKind,
-        doesNotSupport.trim(),
-      ],
-    );
+    final id = const Uuid().v4();
+    db.execute('BEGIN');
+    try {
+      db.execute(
+        'INSERT INTO notes(id,document_id,locator,text,page_number,quoted_text,evidence_kind,does_not_support) VALUES(?,?,?,?,?,?,?,?)',
+        [
+          id,
+          documentId,
+          locator,
+          text,
+          pageNumber,
+          quote.trim(),
+          evidenceKind,
+          doesNotSupport.trim(),
+        ],
+      );
+      if (entryId != null) setNoteEntry(id, entryId);
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   ResearchTask saveTask({
@@ -334,6 +375,32 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
 
   void acceptRun(String runId) =>
       db.execute('UPDATE runs SET accepted=1 WHERE id=?', [runId]);
+
+  /// Records what a finished run means for its hypothesis; see
+  /// [runAssessment]. Execution status and acceptance are left untouched.
+  void assessRun(
+    String runId, {
+    required String result,
+    required bool discriminating,
+    required String reason,
+    num? budgetSpent,
+  }) {
+    final rows = db.select('SELECT * FROM runs WHERE id=?', [runId]);
+    if (rows.isEmpty) throw StateError('Unknown run');
+    final run = runFromRow(rows.single);
+    final data = {
+      ...run.data,
+      'workbench_assessment': runAssessment(
+        status: run.status,
+        result: result,
+        discriminating: discriminating,
+        reason: reason,
+        budgetSpent: budgetSpent,
+        at: DateTime.now(),
+      ),
+    };
+    db.execute('UPDATE runs SET data=? WHERE id=?', [jsonEncode(data), runId]);
+  }
 
   /// Starts a record for work the user chooses to perform in another tool.
   /// Task commands are data and are never launched by this method.
@@ -390,6 +457,7 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     }
     final logs = List<String>.from(old.data['logs'] as List? ?? []);
     if (log.trim().isNotEmpty) logs.add(log.trim());
+    const finished = {'completed', 'failed'};
     final data = <String, dynamic>{
       ...old.data,
       'status': status,
@@ -397,6 +465,18 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
       'logs': logs,
       'conclusion': conclusion.trim(),
     };
+    // A changed outcome invalidates the earlier research judgment; appending
+    // log lines does not.
+    if (status != old.status ||
+        jsonEncode(metrics) != jsonEncode(old.data['metrics'] ?? {}) ||
+        conclusion.trim() != (old.data['conclusion'] ?? '')) {
+      data.remove('workbench_assessment');
+    }
+    if (!finished.contains(status)) {
+      data.remove('finishedAt');
+    } else if (!finished.contains(old.status)) {
+      data['finishedAt'] = DateTime.now().toUtc().toIso8601String();
+    }
     db.execute('UPDATE runs SET status=?,data=? WHERE id=?', [
       status,
       jsonEncode(data),
@@ -412,17 +492,13 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
     );
   }
 
-  void addOutline(String projectId, String heading, String evidenceId) =>
-      db.execute('INSERT INTO outline VALUES(?,?,?,?)', [
-        const Uuid().v4(),
-        projectId,
-        heading,
-        evidenceId,
-      ]);
+  /// Outline evidence links in section order; see `outline_store.dart`.
   List<Map<String, dynamic>> outline(String projectId) => db
-      .select('SELECT * FROM outline WHERE project_id=? ORDER BY rowid', [
-        projectId,
-      ])
+      .select(
+        'SELECT o.* FROM outline o LEFT JOIN sections s ON s.id=o.section_id '
+        'WHERE o.project_id=? ORDER BY s.position,o.rowid',
+        [projectId],
+      )
       .map((r) => Map<String, dynamic>.from(r))
       .toList();
   static Map<String, dynamic> decode(String value) =>

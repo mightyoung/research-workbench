@@ -43,6 +43,11 @@ class ResearchDocument {
   bool get isPdf => relativePath.toLowerCase().endsWith('.pdf');
 }
 
+/// The newest version of each path, given documents ordered oldest-first per
+/// path (older versions are kept only for the notes written on them).
+List<ResearchDocument> currentVersions(List<ResearchDocument> docs) =>
+    {for (final d in docs) d.relativePath: d}.values.toList();
+
 class ResearchTask {
   const ResearchTask({
     required this.id,
@@ -82,12 +87,16 @@ class ReadingNote {
     this.quote = '',
     this.evidenceKind,
     this.doesNotSupport = '',
+    this.entryId,
   });
   final String id, documentId, locator, text;
   final int? pageNumber;
   final String quote;
   final String? evidenceKind;
   final String doesNotSupport;
+
+  /// Local ID of the research record this note is about, if any.
+  final String? entryId;
 }
 
 /// Link between an imported document and a research-skill paper revision.
@@ -103,4 +112,29 @@ class PaperBinding {
   final String documentId, paperId, method;
   final int paperRev;
   final bool hashOk, ambiguous;
+}
+
+/// Evidence support levels a writer assigns to an outline section.
+const sectionSupport = {
+  'unassessed': '未评估',
+  'supported': '证据充分',
+  'partial': '部分支持',
+  'weak': '证据不足',
+  'contested': '存在反证',
+};
+
+class OutlineSection {
+  const OutlineSection({
+    required this.id,
+    required this.projectId,
+    required this.heading,
+    required this.level,
+    required this.position,
+    required this.argument,
+    required this.support,
+  });
+  final String id, projectId, heading, argument, support;
+
+  /// Nesting depth 1–3, rendered as Markdown `##`–`####`.
+  final int level, position;
 }

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -329,6 +330,279 @@ void main() {
     expect(run.data['conclusion'], 'Needs replication');
     expect(run.data['logs'], contains('Run completed manually'));
     expect(find.text('导出结果包'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('ZIP re-import updates the same-name project in place', (
+    tester,
+  ) async {
+    final zip = File(p.join(temp.path, 'fixture.zip'));
+    await tester.runAsync(() async {
+      final claims = [
+        {'id': 'claim-1', 'title': 'Conditional evidence', 'rev': 2},
+        {'id': 'claim-1', 'title': 'Revised evidence', 'rev': 3},
+      ].map(jsonEncode).join('\n');
+      final archive = Archive()
+        ..addFile(ArchiveFile.string('claims.jsonl', claims));
+      zip.writeAsBytesSync(ZipEncoder().encode(archive));
+    });
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(
+      WorkbenchApp(store: store, pickImportFile: (_) async => zip.path),
+    );
+    await settle(tester);
+    await tester.tap(find.byTooltip('导入材料'));
+    await settle(tester);
+    await tester.tap(find.text('导入研究 ZIP'));
+    await settle(tester);
+    await tester.tap(find.text('确认'));
+    await settle(tester);
+    await tester.tap(find.textContaining('更新「fixture」 · 同名'));
+    for (
+      var i = 0;
+      i < 50 && find.textContaining('已更新').evaluate().isEmpty;
+      i++
+    ) {
+      await tester.runAsync(
+        () async => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pump();
+    }
+    await settle(tester);
+    expect(store.projects(), hasLength(1));
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    expect(find.text('Revised evidence'), findsOneWidget);
+    expect(
+      store.entries(projectId, kind: 'claims').map((e) => e.data['rev']),
+      unorderedEquals([2, 3]),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('all skill record kinds are browsable with judgment fields', (
+    tester,
+  ) async {
+    final source = Directory(p.join(temp.path, 'skill', 'research'))
+      ..createSync(recursive: true);
+    await tester.runAsync(() async {
+      for (final log in ['papers', 'sources', 'opportunities']) {
+        File(p.join(source.path, '$log.jsonl')).writeAsStringSync('');
+      }
+      File(p.join(source.path, 'claims.jsonl')).writeAsStringSync(
+        '${jsonEncode({
+          'id': 'c1',
+          'rev': 1,
+          'statement': 'Rework hides state',
+          'evidence_kind': 'inference',
+          'does_not_support': ['general SOP compliance'],
+        })}\n',
+      );
+      File(p.join(source.path, 'tensions.jsonl')).writeAsStringSync(
+        '${jsonEncode({'id': 't1', 'rev': 1, 'observation': 'Done once is not done now', 'tension_type': 'anomaly'})}\n',
+      );
+      await ResearchExchange(store).importResearch(source.parent.path);
+    });
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('矛盾与瓶颈'));
+    await settle(tester);
+    expect(find.text('Done once is not done now'), findsOneWidget);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    expect(find.textContaining('推断'), findsOneWidget);
+    await tester.tap(find.text('Rework hides state'));
+    await settle(tester);
+    expect(find.textContaining('不支持的结论'), findsOneWidget);
+    expect(find.textContaining('general SOP compliance'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a planned experiment becomes a task, run and assessed result', (
+    tester,
+  ) async {
+    final source = Directory(p.join(temp.path, 'plan'))..createSync();
+    await tester.runAsync(() async {
+      File(p.join(source.path, 'experiments.jsonl')).writeAsStringSync(
+        '${jsonEncode({'id': 'e1', 'rev': 1, 'phase': 'planned', 'title': 'Rework probe', 'strongest_rival': 'past completion leaks'})}\n',
+      );
+      await ResearchExchange(store).importResearch(source.path);
+    });
+    tester.view.physicalSize = const Size(1280, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('实验计划'));
+    await settle(tester);
+    await tester.tap(find.text('Rework probe'));
+    await settle(tester);
+    await tester.tap(find.text('生成实验任务'));
+    await settle(tester);
+    expect(find.text('来源实验计划：e1 · r1'), findsOneWidget);
+    await tester.tap(find.text('开始执行记录'));
+    await settle(tester);
+    await tester.tap(find.text('确认'));
+    await settle(tester);
+    final run = store.runs(store.projects().first.id).single;
+    store.updateManualRun(
+      run.id,
+      status: 'completed',
+      metrics: {'accuracy': 0.6},
+      log: '',
+      conclusion: '',
+    );
+    await tester.tap(find.text('运行结果'));
+    await settle(tester);
+    await tester.tap(find.text('评估研究结论'));
+    await settle(tester);
+    await tester.tap(find.text('无定论'));
+    await settle(tester);
+    await tester.tap(find.text('支持').last);
+    await settle(tester);
+    await tester.tap(find.text('结果能区分自身解释与最强对手解释'));
+    await tester.enterText(field('判断理由'), 'drop only after rework');
+    await tester.enterText(field('实际花费（按计划预算单位，写回 skill 时必填）'), '1');
+    await tester.tap(find.text('保存评估'));
+    await settle(tester);
+    expect(find.textContaining('研究结论：支持 · 能区分竞争解释'), findsOneWidget);
+    expect(find.text('导出给 research-workflow'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('outline sections are edited, ordered and cite several items', (
+    tester,
+  ) async {
+    final claim = store.entries(projectId, kind: 'claims').single;
+    final doc = store.documents(projectId).single;
+    store.saveNote(doc.id, 'p.1', 'about the claim', entryId: claim.id);
+    final note = store.notes(doc.id).single;
+    store.addOutline(projectId, 'Findings', claim.id);
+    store.addOutline(projectId, 'Findings', note.id);
+    store.addSection(projectId, 'Limits');
+    tester.view.physicalSize = const Size(1280, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('论文写作'));
+    await settle(tester);
+    expect(find.text('Findings'), findsOneWidget);
+    expect(find.byTooltip('移除此证据'), findsNWidgets(2));
+    await tester.tap(find.byTooltip('编辑段落').first);
+    await settle(tester);
+    await tester.enterText(
+      field('本段论述（证据支持什么）'),
+      'Rework resets completion state.',
+    );
+    await tester.tap(find.text('未评估').last);
+    await settle(tester);
+    await tester.tap(find.text('部分支持').last);
+    await settle(tester);
+    await tester.tap(find.text('保存段落'));
+    await settle(tester);
+    expect(find.text('Rework resets completion state.'), findsOneWidget);
+    expect(store.sections(projectId).first.support, 'partial');
+    await tester.tap(find.byTooltip('下移').first);
+    await settle(tester);
+    expect(store.sections(projectId).map((s) => s.heading), [
+      'Limits',
+      'Findings',
+    ]);
+    await tester.tap(find.byTooltip('移除此证据').first);
+    await settle(tester);
+    expect(store.outline(projectId), hasLength(1));
+
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    await tester.tap(find.text('Conditional evidence'));
+    await settle(tester);
+    expect(find.text('相关精读笔记 (1)'), findsOneWidget);
+    expect(find.text('about the claim'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('evidence links to an existing outline section by dropdown', (
+    tester,
+  ) async {
+    final intro = store.addSection(projectId, 'Introduction');
+    store.addSection(projectId, 'Method', level: 2);
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    await tester.tap(find.text('Conditional evidence'));
+    await settle(tester);
+    await tester.tap(find.text('关联论文提纲'));
+    await settle(tester);
+    expect(field('段落标题'), findsNothing);
+    await tester.tap(find.textContaining('Method'));
+    await settle(tester);
+    await tester.tap(find.text('Introduction').last);
+    await settle(tester);
+    await tester.tap(find.text('关联'));
+    await settle(tester);
+    final claim = store.entries(projectId, kind: 'claims').single;
+    expect(store.outline(projectId).single['section_id'], intro.id);
+    expect(store.outline(projectId).single['evidence_id'], claim.id);
+    expect(store.sections(projectId), hasLength(2));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('nested outline section fits a phone screen', (tester) async {
+    final section = store.addSection(projectId, 'A fairly long nested heading');
+    store.updateSection(
+      section.id,
+      heading: section.heading,
+      level: 3,
+      argument: '',
+      support: 'contested',
+    );
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.byType(NavigationDestination).at(4));
+    await settle(tester);
+    expect(find.text('A fairly long nested heading'), findsOneWidget);
+    expect(find.byTooltip('删除段落'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
