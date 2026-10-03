@@ -189,7 +189,21 @@ class _RelationsPageState extends State<RelationsPage> {
                     o.revision == rev.toString(),
               )
               .toList();
-    _resolved(from, matches, label, '$id · 修订 ${rev ?? '未提供'}');
+    // Pinned links stay pinned; a newer revision is only flagged.
+    final newer =
+        matches.length == 1 &&
+        _objects.any(
+          (o) =>
+              o.kind == kind &&
+              o.sourceId == id.toString() &&
+              (int.tryParse(o.revision) ?? 0) > (int.tryParse('$rev') ?? 0),
+        );
+    _resolved(
+      from,
+      matches,
+      newer ? '$label（有更新修订）' : label,
+      '$id · 修订 ${rev ?? '未提供'}',
+    );
   }
 
   void _resolved(

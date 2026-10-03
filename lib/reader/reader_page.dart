@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
 
 import '../core/models.dart';
+import '../core/research_skill.dart';
 import '../core/store.dart';
 
 /// Reads the imported snapshot; notes are separate records, never source edits.
@@ -34,6 +35,10 @@ class _ReaderPageState extends State<ReaderPage> {
   final _pageNumber = TextEditingController();
   final _quote = TextEditingController();
   final _note = TextEditingController();
+  final _doesNotSupport = TextEditingController();
+  String? _evidenceKind;
+  // Bumped after saving so the evidence dropdown rebuilds empty.
+  int _formGeneration = 0;
   late final Future<String> _markdown;
   int _page = 1;
   int _pageCount = 0;
@@ -54,6 +59,7 @@ class _ReaderPageState extends State<ReaderPage> {
     _pageNumber.dispose();
     _quote.dispose();
     _note.dispose();
+    _doesNotSupport.dispose();
     super.dispose();
   }
 
@@ -83,6 +89,11 @@ class _ReaderPageState extends State<ReaderPage> {
   // Only catalogued local documents from the same imported project may open.
   Future<void> _openLink(String? href) async {
     if (href == null || href.isEmpty) return;
+    final ref = parseSkillRef(href);
+    if (ref != null) {
+      await _showRecord(ref);
+      return;
+    }
     final uri = Uri.tryParse(href);
     if (uri == null) return;
     if (uri.hasScheme || uri.hasAuthority) {
@@ -118,6 +129,107 @@ class _ReaderPageState extends State<ReaderPage> {
           document: linked!,
           onChanged: widget.onChanged,
           loadMarkdown: widget.loadMarkdown,
+        ),
+      ),
+    );
+  }
+
+  /// Opens the exact revision a `[kind/id@rev]` reference names; never the latest.
+  Future<void> _showRecord((String, String, int) ref) async {
+    final (kind, id, rev) = ref;
+    final all = widget.store.entries(widget.document.projectId, kind: kind);
+    final match = all
+        .where((e) => sourceIdOf(e) == id && revOf(e) == rev)
+        .toList();
+    if (match.length != 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '未解析的引用 [$kind/$id@$rev]：${match.isEmpty ? '记录未导入' : '存在重复修订'}',
+          ),
+        ),
+      );
+      return;
+    }
+    final latest = latestRevisions(all)['$kind/$id'] ?? rev;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(match.single.title),
+        content: SizedBox(
+          width: 600,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '[$kind/$id@$rev]${latest > rev ? ' · 有更新修订 r$latest' : ''}',
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  const JsonEncoder.withIndent('  ').convert(match.single.data),
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The confirmed paper binding for this document, with its paper record.
+  (PaperBinding, ResearchEntry?)? get _binding {
+    final b = widget.store
+        .bindings(widget.document.projectId)
+        .where((b) => b.documentId == widget.document.id && !b.ambiguous)
+        .firstOrNull;
+    if (b == null) return null;
+    final paper = widget.store
+        .entries(widget.document.projectId, kind: 'papers')
+        .where((e) => sourceIdOf(e) == b.paperId && revOf(e) == b.paperRev)
+        .firstOrNull;
+    return (b, paper);
+  }
+
+  Widget _paperCard((PaperBinding, ResearchEntry?) bound) {
+    final (b, paper) = bound;
+    final d = paper?.data ?? const {};
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('绑定论文', style: Theme.of(context).textTheme.labelLarge),
+            Text(
+              paper?.title ?? b.paperId,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            Text(
+              [
+                '[papers/${b.paperId}@${b.paperRev}]',
+                if (d['arxiv_id'] != null)
+                  '${d['arxiv_id']}${d['version'] ?? ''}',
+                ?d['publication_status'],
+                if (d['reading_depth'] != null) '阅读深度 ${d['reading_depth']}',
+              ].join(' · '),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            if (!b.hashOk)
+              Text(
+                '文件与登记哈希不符，导出的草稿会带上此标记。',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            const SizedBox(height: 4),
+            const Text('在工作台阅读不会升级论文的阅读深度。'),
+          ],
         ),
       ),
     );
@@ -196,9 +308,14 @@ class _ReaderPageState extends State<ReaderPage> {
         _note.text.trim(),
         pageNumber: pageNumber,
         quote: _quote.text,
+        evidenceKind: _evidenceKind,
+        doesNotSupport: _doesNotSupport.text,
       );
       _note.clear();
       _quote.clear();
+      _doesNotSupport.clear();
+      _evidenceKind = null;
+      _formGeneration++;
       widget.onChanged?.call();
       setState(() {});
       ScaffoldMessenger.of(
@@ -251,6 +368,7 @@ class _ReaderPageState extends State<ReaderPage> {
 
   Widget _notes() {
     final notes = widget.store.notes(widget.document.id);
+    final bound = _binding;
     final entries = widget.store.entries(widget.document.projectId).where((
       entry,
     ) {
@@ -268,6 +386,7 @@ class _ReaderPageState extends State<ReaderPage> {
         ),
         const SizedBox(height: 8),
         const Text('笔记保存在本机，原始文档快照保持不变。'),
+        if (bound != null) ...[const SizedBox(height: 12), _paperCard(bound)],
         if (entries.isNotEmpty) ...[
           const SizedBox(height: 16),
           Text('关联记录', style: Theme.of(context).textTheme.titleSmall),
@@ -339,6 +458,28 @@ class _ReaderPageState extends State<ReaderPage> {
             hintText: '记录解释、疑问或支持主张的证据',
           ),
         ),
+        if (bound != null) ...[
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: ValueKey(_formGeneration),
+            initialValue: _evidenceKind,
+            decoration: const InputDecoration(labelText: '证据类型（可选，回写用）'),
+            items: const [
+              DropdownMenuItem(value: 'paper_statement', child: Text('论文原述')),
+              DropdownMenuItem(value: 'inference', child: Text('推断')),
+              DropdownMenuItem(value: 'hypothesis', child: Text('假设')),
+            ],
+            onChanged: (v) => setState(() => _evidenceKind = v),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _doesNotSupport,
+            decoration: const InputDecoration(
+              labelText: '不支持的更强结论（可选，回写用）',
+              hintText: '例如：普遍提升、跨数据集有效',
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
         FilledButton.icon(
           onPressed: _saveNote,
@@ -365,6 +506,16 @@ class _ReaderPageState extends State<ReaderPage> {
                       ),
                     ),
                   if (note.pageNumber != null) Text('p. ${note.pageNumber}'),
+                  if (note.evidenceKind != null ||
+                      note.doesNotSupport.isNotEmpty)
+                    Text(
+                      [
+                        ?note.evidenceKind,
+                        if (note.doesNotSupport.isNotEmpty)
+                          '不支持：${note.doesNotSupport}',
+                      ].join(' · '),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   if (note.quote.isNotEmpty) ...[
                     const SizedBox(height: 6),
                     SelectableText('“${note.quote}”'),
@@ -464,7 +615,7 @@ class _ReaderPageState extends State<ReaderPage> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 800),
             child: Markdown(
-              data: snapshot.data!,
+              data: linkSkillRefs(snapshot.data!),
               selectable: true,
               padding: const EdgeInsets.all(28),
               imageBuilder: _image,

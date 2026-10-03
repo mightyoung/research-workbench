@@ -16,12 +16,10 @@ void main() {
         store.close();
         temp.deleteSync(recursive: true);
       });
-      store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
-        'p',
-        'Fixture',
-        '',
-        '',
-      ]);
+      store.db.execute(
+        'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+        ['p', 'Fixture', '', ''],
+      );
       void entry(
         String key,
         String kind,

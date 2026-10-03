@@ -51,6 +51,7 @@ app.*.map.json
 /artifacts/
 /data/
 /snapshots/
+/.worktrees/
 *.db
 *.sqlite
 .env
