@@ -52,6 +52,7 @@ app.*.map.json
 /data/
 /snapshots/
 /.worktrees/
+/.superpowers/
 *.db
 *.sqlite
 .env
