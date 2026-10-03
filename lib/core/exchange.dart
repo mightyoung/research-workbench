@@ -159,6 +159,13 @@ class ResearchExchange {
     final oldDocs = {for (final d in store.documents(id)) d.relativePath: d.id};
     store.db.execute('BEGIN');
     try {
+      final manifest = File(p.join(snapshot.path, 'manifest.json'));
+      if (await manifest.exists()) {
+        final declared = jsonDecode(await manifest.readAsString());
+        if (declared is Map && declared['format'] == 'research-package-v1') {
+          throw const FormatException('这是任务包或结果包，请用对应的导入入口');
+        }
+      }
       if (existing == null) {
         store.db.execute('INSERT INTO projects VALUES(?,?,?,?)', [
           id,
@@ -167,12 +174,16 @@ class ResearchExchange {
           '',
         ]);
       }
+      // Refreshing deletes what the source no longer has, so material with
+      // nothing recognisable must not reach the cleanup below.
+      var found = 0;
       await for (final entity in snapshot.list(recursive: true)) {
         if (entity is! File) {
           continue;
         }
         final relative = p.relative(entity.path, from: snapshot.path);
         final ext = p.extension(relative).toLowerCase();
+        if (['.md', '.markdown', '.pdf'].contains(ext)) found++;
         if (['.md', '.markdown', '.pdf'].contains(ext)) {
           final docId = oldDocs.remove(relative);
           if (docId != null) {
@@ -222,6 +233,7 @@ class ResearchExchange {
                         '$base:$line')
                     .toString();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
+            found++;
             final reuse = oldEntries[_entryKey(kind, data)];
             if (reuse != null && reuse.isNotEmpty) {
               store.db.execute('UPDATE entries SET title=?,data=? WHERE id=?', [
@@ -240,6 +252,9 @@ class ResearchExchange {
             }
           }
         }
+      }
+      if (found == 0) {
+        throw const FormatException('所选材料中没有 Markdown/PDF 文档或 JSONL 研究记录');
       }
       for (final entryId in oldEntries.values.expand((ids) => ids)) {
         store.db.execute(
