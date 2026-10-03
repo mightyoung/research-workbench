@@ -543,6 +543,34 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     },
   );
 
+  test('id-less records keep identity when only key order changes', () async {
+    final source = Directory(p.join(temp.path, 'order'))..createSync();
+    final claims = File(p.join(source.path, 'claims.jsonl'))
+      ..writeAsStringSync('{"title":"t","statement":"s"}\n');
+    final project = await exchange.importResearch(source.path);
+    final before = store.entries(project.id).single.id;
+    claims.writeAsStringSync('{"statement":"s","title":"t"}\n');
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    expect(store.entries(project.id).single.id, before);
+
+    final latest = currentVersions(store.documents(project.id));
+    expect(latest, isEmpty);
+    ResearchDocument doc(String id, String path) => ResearchDocument(
+      id: id,
+      projectId: 'p',
+      relativePath: path,
+      absolutePath: path,
+    );
+    expect(
+      currentVersions([
+        doc('a1', 'a.md'),
+        doc('a2', 'a.md'),
+        doc('b', 'b.md'),
+      ]).map((d) => d.id),
+      ['a2', 'b'],
+    );
+  });
+
   test('duplicate source revisions are skipped or rejected', () async {
     final source = Directory(p.join(temp.path, 'dupes'))..createSync();
     final claims = File(p.join(source.path, 'claims.jsonl'));

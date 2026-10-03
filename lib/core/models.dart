@@ -32,6 +32,11 @@ class ResearchDocument {
   bool get isPdf => relativePath.toLowerCase().endsWith('.pdf');
 }
 
+/// The newest version of each path, given documents ordered oldest-first per
+/// path (older versions are kept only for the notes written on them).
+List<ResearchDocument> currentVersions(List<ResearchDocument> docs) =>
+    {for (final d in docs) d.relativePath: d}.values.toList();
+
 class ResearchTask {
   const ResearchTask({
     required this.id,
