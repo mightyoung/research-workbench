@@ -1,3 +1,7 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
 import 'models.dart';
 
 /// Conversions between workbench tasks/runs and research-workflow
@@ -135,9 +139,15 @@ Map<String, dynamic> executedExperiment({
   ];
   if (measured.isEmpty) throw const FormatException('没有可写回的数值指标');
   final short = run.id.length > 8 ? run.id.substring(0, 8) : run.id;
+  // Identity from the whole run ID: imported run IDs are free-form, so a
+  // prefix could collide between runs of the same plan.
+  final digest = sha256
+      .convert(utf8.encode(run.id))
+      .toString()
+      .substring(0, 16);
   return {
     'schema_version': 2,
-    'id': '${source['id']}-run-$short',
+    'id': '${source['id']}-run-$digest',
     'rev': rev,
     'updated_at': now.toUtc().toIso8601String(),
     'title': '${task.title} · 运行 $short',

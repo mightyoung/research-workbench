@@ -126,11 +126,20 @@ class ResearchExchange {
     }
   }
 
-  /// Finds whether a local record is cited by the outline or a reading note
-  /// (`?1` = local ID).
-  static const _citedSql =
-      'SELECT 1 FROM outline WHERE evidence_id=?1 '
-      'UNION ALL SELECT 1 FROM notes WHERE entry_id=?1';
+  /// SQL conditions, over an `entries` row aliased `e`, under which a record
+  /// is cited and must neither change under the same revision nor be dropped.
+  static const _citedBy = [
+    'e.id IN (SELECT evidence_id FROM outline)',
+    'e.id IN (SELECT entry_id FROM notes WHERE entry_id IS NOT NULL)',
+    // A plan a generated task was built from (see taskFromExperiment).
+    "e.kind='experiments' AND EXISTS (SELECT 1 FROM tasks t "
+        'WHERE t.project_id=e.project_id '
+        "AND json_extract(t.spec,'\$.source.kind')='experiments' "
+        "AND json_extract(t.spec,'\$.source.id')=json_extract(e.data,'\$.id') "
+        "AND json_extract(t.spec,'\$.source.rev')=json_extract(e.data,'\$.rev'))",
+  ];
+  static final _cited = _citedBy.map((c) => '($c)').join(' OR ');
+  static final _citedSql = 'SELECT 1 FROM entries e WHERE e.id=? AND ($_cited)';
 
   /// Run data the workbench adds on top of an imported result payload.
   static const _localRunKeys = {
@@ -167,7 +176,7 @@ class ResearchExchange {
   static String _entryKey(String kind, Map<String, dynamic> data) =>
       data['id'] != null
       ? '$kind\u0000id:${data['id']}\u0000rev:${data['rev']}'
-      : '$kind\u0000sha:${sha256.convert(utf8.encode(jsonEncode(data)))}';
+      : '$kind\u0000sha:${sha256.convert(utf8.encode(_canonical(data)))}';
 
   /// Imports a research snapshot. With [intoProjectId] the snapshot refreshes
   /// that project: records and documents keep their local IDs so notes and
@@ -330,11 +339,9 @@ class ResearchExchange {
         throw const FormatException('所选材料中没有 Markdown/PDF 文档或 JSONL 研究记录');
       }
       for (final entryId in oldEntries.values.expand((ids) => ids)) {
-        store.db.execute(
-          'DELETE FROM entries WHERE id=? AND id NOT IN (SELECT evidence_id FROM outline) '
-          'AND id NOT IN (SELECT entry_id FROM notes WHERE entry_id IS NOT NULL)',
-          [entryId],
-        );
+        if (store.db.select(_citedSql, [entryId]).isEmpty) {
+          store.db.execute('DELETE FROM entries WHERE id=?', [entryId]);
+        }
       }
       for (final doc in oldDocs.values) {
         store.db.execute(
@@ -677,7 +684,10 @@ class ResearchExchange {
       } else {
         throw const FormatException('Result ZIP must contain one result.json');
       }
-      final data = WorkbenchStore.decode(await result.readAsString());
+      final data = WorkbenchStore.decode(await result.readAsString())
+        // Research assessments and export bookkeeping are made in this
+        // workbench, never taken from a result package.
+        ..removeWhere((k, _) => _localRunKeys.contains(k));
       final id = data['runId'],
           taskId = data['taskId'],
           revision = data['taskRevision'],
