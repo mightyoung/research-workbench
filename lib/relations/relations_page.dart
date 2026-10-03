@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/research_kinds.dart';
 import '../core/store.dart';
 
 /// A local object explorer. Edges require explicit identifiers and revisions;
@@ -41,11 +42,28 @@ class _RelationsPageState extends State<RelationsPage> {
   final Map<String, List<String>> _unresolved = {};
   String _kind = 'all';
   String? _selected;
+
+  /// research-workflow references as `<prefix>_id` + `<prefix>_rev`.
+  static const _flatRefs = [
+    ('claims', 'paper', 'papers', '引用论文'),
+    ('papers', 'source', 'sources', '来源'),
+  ];
+
+  /// research-workflow references as `{id, rev}` maps or lists of them; a
+  /// null target means each reference names its own `kind`.
+  static const _nestedRefs = <(String, String, String?, String)>[
+    ('claims', 'conflicts', 'claims', '冲突主张'),
+    ('opportunities', 'supports', 'claims', '支持依据'),
+    ('opportunities', 'refutes', 'claims', '反驳依据'),
+    ('opportunities', 'search_refs', 'searches', '检索依据'),
+    ('opportunities', 'tension_refs', 'tensions', '针对瓶颈'),
+    ('tensions', 'evidence', null, '证据'),
+    ('experiments', 'opportunity', 'opportunities', '检验候选'),
+    ('experiments', 'plan_ref', 'experiments', '执行计划'),
+    ('failures', 'evidence', null, '失败证据'),
+  ];
   static const _names = {
-    'papers': '论文',
-    'claims': '主张',
-    'opportunities': '候选',
-    'experiments': '实验计划',
+    ...recordKinds,
     'task': '任务规格',
     'run': '执行结果',
     'outline': '写作提纲',
@@ -123,34 +141,34 @@ class _RelationsPageState extends State<RelationsPage> {
     }
     for (final object in _objects) {
       final data = object.data;
-      if (object.kind == 'claims' && data['paper_id'] != null) {
-        _reference(
-          object,
-          'papers',
-          data['paper_id'],
-          data['paper_rev'],
-          '引用论文',
-        );
-      }
-      if (object.kind == 'opportunities') {
-        for (final field in ['supports', 'refutes']) {
-          final refs = data[field];
-          if (refs is List) {
-            for (final ref in refs.whereType<Map>()) {
-              _reference(
-                object,
-                'claims',
-                ref['id'],
-                ref['rev'],
-                field == 'supports' ? '支持依据' : '反驳依据',
-              );
-            }
-          }
+      for (final (kind, prefix, target, label) in _flatRefs) {
+        if (object.kind == kind && data['${prefix}_id'] != null) {
+          _reference(
+            object,
+            target,
+            data['${prefix}_id'],
+            data['${prefix}_rev'],
+            label,
+          );
         }
       }
-      if (object.kind == 'experiments' && data['opportunity'] is Map) {
-        final ref = data['opportunity'] as Map;
-        _reference(object, 'opportunities', ref['id'], ref['rev'], '检验候选');
+      for (final (kind, field, target, label) in _nestedRefs) {
+        if (object.kind != kind) continue;
+        final value = data[field];
+        final refs = value is Map
+            ? [value]
+            : value is List
+            ? value.whereType<Map>().toList()
+            : const <Map>[];
+        for (final ref in refs) {
+          _reference(
+            object,
+            target ?? '${ref['kind']}',
+            ref['id'],
+            ref['rev'],
+            label,
+          );
+        }
       }
       if (object.kind == 'run') {
         _reference(

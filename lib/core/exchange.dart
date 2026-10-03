@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
+import 'research_kinds.dart';
 import 'store.dart';
 
 class ResearchExchange {
@@ -191,15 +192,7 @@ class ResearchExchange {
         }
         if (ext == '.jsonl') {
           final base = p.basenameWithoutExtension(relative);
-          final kind =
-              [
-                'papers',
-                'claims',
-                'opportunities',
-                'experiments',
-              ].contains(base)
-              ? base
-              : 'other';
+          final kind = recordKinds.containsKey(base) ? base : 'other';
           var line = 0;
           for (final text in const LineSplitter().convert(
             await entity.readAsString(),
@@ -217,6 +210,10 @@ class ResearchExchange {
                 (data['title'] ??
                         data['claim'] ??
                         data['statement'] ??
+                        data['observation'] ??
+                        data['query'] ??
+                        data['step'] ??
+                        data['cause'] ??
                         data['name'] ??
                         data['id'] ??
                         '$base:$line')

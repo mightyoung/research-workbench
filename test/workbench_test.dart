@@ -388,6 +388,48 @@ void main() {
     },
   );
 
+  testWidgets('all skill record kinds are browsable with judgment fields', (
+    tester,
+  ) async {
+    final source = Directory(p.join(temp.path, 'skill'))..createSync();
+    await tester.runAsync(() async {
+      File(p.join(source.path, 'claims.jsonl')).writeAsStringSync(
+        '${jsonEncode({
+          'id': 'c1',
+          'rev': 1,
+          'statement': 'Rework hides state',
+          'evidence_kind': 'inference',
+          'does_not_support': ['general SOP compliance'],
+        })}\n',
+      );
+      File(p.join(source.path, 'tensions.jsonl')).writeAsStringSync(
+        '${jsonEncode({'id': 't1', 'rev': 1, 'observation': 'Done once is not done now', 'tension_type': 'anomaly'})}\n',
+      );
+      await ResearchExchange(store).importResearch(source.path);
+    });
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    await tester.pumpWidget(WorkbenchApp(store: store));
+    await settle(tester);
+    await tester.tap(find.text('文库与证据'));
+    await settle(tester);
+    await tester.tap(find.text('瓶颈与矛盾'));
+    await settle(tester);
+    expect(find.text('Done once is not done now'), findsOneWidget);
+    await tester.tap(find.text('主张'));
+    await settle(tester);
+    expect(find.textContaining('推断'), findsOneWidget);
+    await tester.tap(find.text('Rework hides state'));
+    await settle(tester);
+    expect(find.textContaining('不支持的结论'), findsOneWidget);
+    expect(find.textContaining('general SOP compliance'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('LAN transfer opens without starting a listener', (tester) async {
     await tester.pumpWidget(WorkbenchApp(store: store));
     await settle(tester);

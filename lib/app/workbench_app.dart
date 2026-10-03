@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
+import '../core/research_kinds.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import 'lan_transfer_page.dart';
@@ -701,6 +702,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           (d) => d.relativePath.toLowerCase().contains(search.toLowerCase()),
         )
         .toList();
+    final presentKinds = store.entries(p.id).map((e) => e.kind).toSet();
     final allEntries = store.entries(p.id, kind: entryKind);
     final latest = latestRevisions(allEntries);
     final hidden = allEntries.length - latest.length;
@@ -732,21 +734,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         runSpacing: 8,
         children: [
           for (final kind in [
-            'papers',
-            'claims',
-            'opportunities',
-            'experiments',
+            ...{...recordKinds.keys, 'other'}.where(
+              (k) =>
+                  const {
+                    'papers',
+                    'claims',
+                    'opportunities',
+                    'experiments',
+                  }.contains(k) ||
+                  presentKinds.contains(k),
+            ),
             'documents',
           ])
             ChoiceChip(
               label: Text(
-                {
-                  'papers': '论文',
-                  'claims': '主张',
-                  'opportunities': '候选',
-                  'experiments': '实验计划',
-                  'documents': '文件',
-                }[kind]!,
+                recordKinds[kind] ??
+                    const {'other': '其他记录', 'documents': '文件'}[kind]!,
               ),
               selected: entryKind == kind,
               onSelected: (_) => setState(() => entryKind = kind),
@@ -799,15 +802,36 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     final d = e.data;
     return [
       if (d['rev'] != null) 'r${d['rev']}',
+      for (final f in summaryFields) displayValue(fieldValue(d, f)),
       d['year'],
       d['venue'],
       d['reading_depth'],
       d['review_status'],
       d['status'],
-      d['phase'],
       d['basis'],
-    ].where((v) => v != null).join(' · ');
+    ].where((v) => v != null && v != '').join(' · ');
   }
+
+  /// Labelled judgment fields of a record kind that are present in [d].
+  List<Widget> judgment(String kind, Map<String, dynamic> d) => [
+    for (final MapEntry(key: path, value: label)
+        in (judgmentFields[kind] ?? const <String, String>{}).entries)
+      if (displayValue(fieldValue(d, path)).isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SelectableText.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: '$label　',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                TextSpan(text: displayValue(fieldValue(d, path))),
+              ],
+            ),
+          ),
+        ),
+  ];
 
   Future<void> showEntry(ResearchEntry e) async {
     final d = e.data;
@@ -824,6 +848,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                 Text(entrySubtitle(e)),
                 const SizedBox(height: 12),
                 if (d['statement'] != null) SelectableText('${d['statement']}'),
+                const SizedBox(height: 8),
+                ...judgment(e.kind, d),
                 if (d['locator'] != null)
                   SelectableText(
                     '证据定位\n${const JsonEncoder.withIndent('  ').convert(d['locator'])}',
