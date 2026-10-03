@@ -26,13 +26,10 @@ void main() {
         String title,
         Map<String, dynamic> data,
       ) {
-        store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
-          key,
-          'p',
-          kind,
-          title,
-          jsonEncode(data),
-        ]);
+        store.db.execute(
+          'INSERT INTO entries(id,project_id,kind,title,data) VALUES(?,?,?,?,?)',
+          [key, 'p', kind, title, jsonEncode(data)],
+        );
       }
 
       entry('local-paper', 'papers', 'Paper one', {

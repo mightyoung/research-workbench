@@ -207,6 +207,7 @@ Future<List<String>?> pickDraftNotes(
                             doc.relativePath,
                             if (note.pageNumber != null)
                               'p. ${note.pageNumber}',
+                            if (note.needsReview) '原文已变更，待复核',
                             ?reason,
                           ].join(' · '),
                         ),
@@ -240,6 +241,8 @@ Future<void> showDraftSummary(BuildContext context, ClaimDraftExport result) =>
           [
             '导出 ${result.rows.length} 条，跳过 ${result.skipped.length} 条。',
             for (final (_, reason) in result.skipped) '· 跳过：$reason',
+            if (result.notesNeedingReview > 0)
+              '${result.notesNeedingReview} 条笔记所在文件在再导入时已变更，追加前请重新核对原文。',
             if (result.hashMismatches > 0)
               '${result.hashMismatches} 条来自哈希不符的文件，追加前请核对材料。',
             if (result.missingFields.isNotEmpty)

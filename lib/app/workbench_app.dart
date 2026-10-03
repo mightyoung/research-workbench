@@ -12,6 +12,7 @@ import '../core/research_skill.dart';
 import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import 'lan_transfer_page.dart';
+import 'reimport_panels.dart';
 import 'skill_panels.dart';
 import 'theme.dart';
 
@@ -143,24 +144,30 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           )
         : await pickFile(['zip']);
     if (path == null || !mounted) return;
-    if (!await confirm(
-      '导入研究快照',
-      '将所选材料复制到工作台私有资料库，原目录保持不变。\n$path\n论文、主张和候选保留原有状态。',
-    )) {
-      return;
-    }
+    await runResearchImport(path);
+  }
+
+  /// Shared by file and LAN imports: choose new project or new snapshot.
+  Future<void> runResearchImport(String path) async {
+    final target = await chooseImportTarget(context, path, store.projects());
+    if (target == null || !mounted) return;
     await action(() async {
       final exchange = ResearchExchange(store);
-      final p = await exchange.importResearch(path);
+      final p = await exchange.importResearch(
+        path,
+        intoProjectId: target.isEmpty ? null : target,
+      );
       projectId = p.id;
       section = 0;
       final (files, bytes) = exchange.lastSkipped;
       message(
-        p.isSkill
-            ? '已导入 research-skill 项目 ${p.title}'
-                  '${files == 0 ? '' : '；跳过 $files 个文件（${(bytes / 1048576).toStringAsFixed(1)} MiB：源码包、数据集、权重等）'}'
-            : '已导入 ${p.title}',
+        '${p.isSkill ? '已导入 research-skill 项目' : '已导入'} ${p.title}'
+        '${files == 0 ? '' : '；跳过 $files 个文件（${(bytes / 1048576).toStringAsFixed(1)} MiB：源码包、数据集、权重等）'}',
       );
+      final summary = exchange.lastReimport;
+      if (summary != null && mounted) {
+        await showReimportSummary(context, summary);
+      }
     });
   }
 
@@ -229,13 +236,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
         });
       }
     } else if (kind == 'research') {
-      final project = await exchange.importResearch(path);
-      if (mounted) {
-        setState(() {
-          projectId = project.id;
-          section = 0;
-        });
-      }
+      await runResearchImport(path);
     } else {
       throw const FormatException('Unknown received content type');
     }
@@ -556,6 +557,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
           ],
         ),
       ),
+      if (store.unmigratedNotes(p.id) case final left when left.isNotEmpty)
+        card(
+          '未迁移笔记（${left.length}）',
+          UnmigratedNotes(notes: left, onOpen: openDocument),
+        ),
       if (p.isSkill)
         card(
           '回写 research-skill',
@@ -1390,9 +1396,11 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
   Widget writing() {
     final p = project!;
     final outline = store.outline(p.id);
-    final entries = store.entries(p.id);
+    // Outline links can still point at an earlier snapshot after re-import.
+    final entries = store.entries(p.id, allSnapshots: true);
+    final current = {for (final e in store.entries(p.id)) e.id};
     final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
-      for (final doc in store.documents(p.id))
+      for (final doc in store.documents(p.id, allSnapshots: true))
         for (final note in store.notes(doc.id)) note.id: (doc, note),
     };
     return layout([
@@ -1442,6 +1450,8 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                               '${note.$2.pageNumber == null ? '' : ' · p. ${note.$2.pageNumber}'}'),
               ),
               SelectableText(id),
+              if (e != null && !current.contains(e.id))
+                const Text('旧快照记录：最新导入中未找到同一修订'),
               if (note != null && note.$2.quote.isNotEmpty)
                 SelectableText('“${note.$2.quote}”'),
               if (e != null)

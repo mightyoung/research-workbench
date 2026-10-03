@@ -1,5 +1,12 @@
 # 验证记录（2026-10-02）
 
+## research-skill 集成第二期：再导入（2026-10-03）
+
+分支 `feat/research-skill-reimport`。
+
+- `flutter analyze`：无问题。`flutter test`：48 项通过。新增 `reimport_test.dart`（笔记迁移与待复核、未迁移笔记、提纲按修订迁移、日志被改写时提纲留在旧快照、目录→ZIP 路径匹配、人工绑定沿用、草稿带复核标记、未知目标项目在复制前拒绝）和 `reimport_ui_test.dart`（导入目标选择、未迁移笔记卡片、阅读器待复核与"标记已复核"）。v3 迁移测试夹具补上真实存在的 `entries` 表，并断言旧数据归入遗留快照后仍可见。
+- 端到端：以 research-skill v6.5 的 `examples/v2-case/discover` 为第一轮、`update` 为第二轮。在第一轮的 `REPORT.md` 写笔记，并把提纲关联到 `[claims/c-recent@1]`；再把第二轮导入同一项目。结果：笔记迁移 1 条，因报告内容变化标为待复核；提纲仍指向 `c-recent@1`（最新为 r3，不自动改指向）；`c-recent` 显示 3 个修订；项目数保持 1。
+
 ## research-skill 集成第一期（2026-10-03）
 
 分支 `feat/research-skill-integration`，参考 research-skill v6.5（`bd9e9d8`）。

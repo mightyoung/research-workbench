@@ -329,7 +329,9 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
 CREATE TABLE projects(id TEXT PRIMARY KEY,title TEXT,question TEXT,next_step TEXT);
 CREATE TABLE documents(id TEXT PRIMARY KEY,project_id TEXT,relative_path TEXT,snapshot_path TEXT);
 CREATE TABLE notes(id TEXT PRIMARY KEY,document_id TEXT,locator TEXT,text TEXT);
+CREATE TABLE entries(id TEXT PRIMARY KEY,project_id TEXT,kind TEXT,title TEXT,data TEXT);
 INSERT INTO projects VALUES('p','Project','','');
+INSERT INTO entries VALUES('e','p','claims','Legacy claim','{}');
 INSERT INTO documents VALUES('d','p','paper.md','paper.md');
 INSERT INTO notes VALUES('n','d','Section 2','Legacy note');
 PRAGMA user_version=3;
@@ -341,6 +343,10 @@ PRAGMA user_version=3;
     expect(note.text, 'Legacy note');
     expect(note.pageNumber, isNull);
     expect(note.quote, isEmpty);
-    expect(WorkbenchStore.schemaVersion, 5);
+    // v6 files pre-existing rows under a legacy snapshot that stays current.
+    expect(migrated.documents('p').single.id, 'd');
+    expect(migrated.entries('p').single.title, 'Legacy claim');
+    expect(note.needsReview, isFalse);
+    expect(WorkbenchStore.schemaVersion, 6);
   });
 }

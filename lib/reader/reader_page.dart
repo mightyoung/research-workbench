@@ -505,6 +505,27 @@ class _ReaderPageState extends State<ReaderPage> {
                         color: Theme.of(context).colorScheme.primary,
                       ),
                     ),
+                  if (note.needsReview)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '再导入时原文已变更，待复核',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            widget.store.clearNoteReview(note.id);
+                            widget.onChanged?.call();
+                            setState(() {});
+                          },
+                          child: const Text('标记已复核'),
+                        ),
+                      ],
+                    ),
                   if (note.pageNumber != null) Text('p. ${note.pageNumber}'),
                   if (note.evidenceKind != null ||
                       note.doesNotSupport.isNotEmpty)

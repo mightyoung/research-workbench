@@ -338,6 +338,7 @@ Map<String, dynamic> claimDraft(
       'document_path': s.projectPath,
       'document_sha256': s.document.sha256,
       'hash_mismatch': !s.binding.hashOk,
+      'note_needs_review': note.needsReview,
       'quote': quote,
       'pdf_page': note.pageNumber,
       'exported_at': now.toUtc().toIso8601String(),

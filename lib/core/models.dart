@@ -82,12 +82,16 @@ class ReadingNote {
     this.quote = '',
     this.evidenceKind,
     this.doesNotSupport = '',
+    this.needsReview = false,
   });
   final String id, documentId, locator, text;
   final int? pageNumber;
   final String quote;
   final String? evidenceKind;
   final String doesNotSupport;
+
+  /// Set when a re-import found the document's bytes changed.
+  final bool needsReview;
 }
 
 /// Link between an imported document and a research-skill paper revision.

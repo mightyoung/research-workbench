@@ -6,7 +6,7 @@
 - ResearchProject { String id, title, question, nextStep, layout, skillRoot; bool get isSkill; } (layout generic/research-skill-v1/research-skill-v2)
 - ResearchTask { String id, projectId, title, goal; int revision; Map<String,dynamic> spec; }
 - ResearchRun { String id, taskId, status; int taskRevision; bool accepted; Map<String,dynamic> data; }
-- ReadingNote { String id, documentId, locator, text, quote, doesNotSupport; int? pageNumber; String? evidenceKind; }
+- ReadingNote { String id, documentId, locator, text, quote, doesNotSupport; int? pageNumber; String? evidenceKind; bool needsReview; }
 - PaperBinding { String documentId, paperId, method; int paperRev; bool hashOk, ambiguous; }
 
 `lib/core/store.dart` WorkbenchStore.open(String rootPath); `.rootPath`; `.close()`; methods synchronous unless explicitly Future:
@@ -14,6 +14,7 @@
 `saveProject(String id,{required String question,required String nextStep})`;
 `saveNote(String documentId,String locator,String text,{int? pageNumber,String quote,String? evidenceKind,String doesNotSupport})`;
 `bindings(String projectId)` -> List<PaperBinding>; `confirmBinding(String documentId,String paperId)`;
+`documents`/`entries` read the project's current snapshot unless `allSnapshots: true`; `unmigratedNotes(String projectId)` -> List<(ResearchDocument, ReadingNote)>; `clearNoteReview(String noteId)`;
 `saveTask({String? id,required String projectId,required String title,required String goal,required Map<String,dynamic> spec})` -> ResearchTask;
 `acceptRun(String runId)`;
 `addOutline(String projectId,String heading,String evidenceId)`;
@@ -25,6 +26,7 @@
 `Future<ResearchRun> importResult(String jsonOrZipPath)`;
 `Future<String> exportReport(String projectId,String destinationDirectory)`;
 `Future<ClaimDraftExport> exportClaimDrafts(String projectId,Iterable<String> noteIds,String destinationDirectory)`; `lastSkipped` -> (files, bytes) of the last research import.
+`importResearch(path, {String? intoProjectId})` imports into an existing project as its new current snapshot; `lastReimport` -> ReimportSummary.
 
 `lib/core/research_skill.dart`: research-skill v6.5 layout detection, path filter, revision groups, paper bindings, `[kind/id@rev]` links and V2 claim drafts. See docs/research-skill-integration.md.
 

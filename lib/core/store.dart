@@ -39,6 +39,18 @@ ALTER TABLE notes ADD COLUMN evidence_kind TEXT;
 ALTER TABLE notes ADD COLUMN does_not_support TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(id),paper_id TEXT,paper_rev INTEGER,method TEXT,hash_ok INTEGER,ambiguous INTEGER,PRIMARY KEY(document_id,paper_id));''',
     ),
+    // v6: every import is a snapshot; views read the project's current one.
+    (db) => db.execute(
+      '''CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),imported_at TEXT,source_label TEXT);
+ALTER TABLE projects ADD COLUMN current_snapshot TEXT;
+ALTER TABLE documents ADD COLUMN snapshot_id TEXT;
+ALTER TABLE entries ADD COLUMN snapshot_id TEXT;
+ALTER TABLE notes ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0;
+INSERT INTO snapshots SELECT 'legacy-'||id,id,NULL,title FROM projects;
+UPDATE projects SET current_snapshot='legacy-'||id;
+UPDATE documents SET snapshot_id='legacy-'||project_id;
+UPDATE entries SET snapshot_id='legacy-'||project_id;''',
+    ),
   ];
   static int get schemaVersion => _migrations.length;
 
@@ -130,9 +142,17 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
         ),
       )
       .toList();
-  List<ResearchDocument> documents(String projectId) => db
+
+  /// Rows of the project's current snapshot unless [allSnapshots].
+  static const _current =
+      ' AND snapshot_id IS (SELECT current_snapshot FROM projects WHERE id=project_id)';
+
+  List<ResearchDocument> documents(
+    String projectId, {
+    bool allSnapshots = false,
+  }) => db
       .select(
-        'SELECT * FROM documents WHERE project_id=? ORDER BY relative_path',
+        'SELECT * FROM documents WHERE project_id=?${allSnapshots ? '' : _current} ORDER BY relative_path',
         [projectId],
       )
       .map(
@@ -145,9 +165,13 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
         ),
       )
       .toList();
-  List<ResearchEntry> entries(String projectId, {String? kind}) => db
+  List<ResearchEntry> entries(
+    String projectId, {
+    String? kind,
+    bool allSnapshots = false,
+  }) => db
       .select(
-        'SELECT * FROM entries WHERE project_id=?${kind == null ? '' : ' AND kind=?'} ORDER BY rowid',
+        'SELECT * FROM entries WHERE project_id=?${kind == null ? '' : ' AND kind=?'}${allSnapshots ? '' : _current} ORDER BY rowid',
         [projectId, ?kind],
       )
       .map(
@@ -210,12 +234,38 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
           quote: r['quoted_text'],
           evidenceKind: r['evidence_kind'],
           doesNotSupport: r['does_not_support'],
+          needsReview: r['needs_review'] == 1,
         ),
       )
       .toList();
+
+  /// Notes left on documents of earlier snapshots after a re-import.
+  List<(ResearchDocument, ReadingNote)> unmigratedNotes(String projectId) {
+    final current = {for (final d in documents(projectId)) d.id};
+    return [
+      for (final d in documents(projectId, allSnapshots: true))
+        if (!current.contains(d.id))
+          for (final n in notes(d.id)) (d, n),
+    ];
+  }
+
+  /// [confirmBinding] without its own transaction, for callers inside one.
+  void applyBindingChoice(String documentId, String paperId) {
+    db.execute(
+      'DELETE FROM paper_bindings WHERE (document_id=? OR paper_id=?) AND NOT (document_id=? AND paper_id=?) AND ambiguous=1',
+      [documentId, paperId, documentId, paperId],
+    );
+    db.execute(
+      "UPDATE paper_bindings SET ambiguous=0,method=method||'+manual' WHERE document_id=? AND paper_id=? AND method NOT LIKE '%+manual'",
+      [documentId, paperId],
+    );
+  }
+
+  void clearNoteReview(String noteId) =>
+      db.execute('UPDATE notes SET needs_review=0 WHERE id=?', [noteId]);
   List<PaperBinding> bindings(String projectId) => db
       .select(
-        'SELECT b.* FROM paper_bindings b JOIN documents d ON d.id=b.document_id WHERE d.project_id=?',
+        'SELECT b.* FROM paper_bindings b JOIN documents d ON d.id=b.document_id WHERE d.project_id=? AND d.snapshot_id IS (SELECT current_snapshot FROM projects WHERE id=d.project_id)',
         [projectId],
       )
       .map(
@@ -244,14 +294,7 @@ CREATE TABLE IF NOT EXISTS paper_bindings(document_id TEXT REFERENCES documents(
   void confirmBinding(String documentId, String paperId) {
     db.execute('BEGIN');
     try {
-      db.execute(
-        'DELETE FROM paper_bindings WHERE (document_id=? OR paper_id=?) AND NOT (document_id=? AND paper_id=?) AND ambiguous=1',
-        [documentId, paperId, documentId, paperId],
-      );
-      db.execute(
-        "UPDATE paper_bindings SET ambiguous=0,method=method||'+manual' WHERE document_id=? AND paper_id=?",
-        [documentId, paperId],
-      );
+      applyBindingChoice(documentId, paperId);
       db.execute('COMMIT');
     } catch (_) {
       db.execute('ROLLBACK');

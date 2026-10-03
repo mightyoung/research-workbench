@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart' show Row;
 import 'package:uuid/uuid.dart';
 import 'models.dart';
 import 'research_skill.dart';
@@ -152,7 +153,25 @@ class ResearchExchange {
     }
   }
 
-  Future<ResearchProject> importResearch(String directoryOrZipPath) async {
+  /// What the last re-import carried over; null after a fresh import.
+  ReimportSummary? lastReimport;
+
+  /// Imports a snapshot as a new project, or with [intoProjectId] as the new
+  /// current snapshot of that project (design §8). Earlier snapshots stay.
+  Future<ResearchProject> importResearch(
+    String directoryOrZipPath, {
+    String? intoProjectId,
+  }) async {
+    lastReimport = null;
+    final target = intoProjectId == null
+        ? null
+        : store.db.select(
+            'SELECT title,skill_root,current_snapshot FROM projects WHERE id=?',
+            [intoProjectId],
+          ).firstOrNull;
+    if (intoProjectId != null && target == null) {
+      throw StateError('Unknown project: $intoProjectId');
+    }
     String? root;
     final snapshot = await _snapshot(
       directoryOrZipPath,
@@ -167,16 +186,26 @@ class ResearchExchange {
               };
       },
     );
-    final id = const Uuid().v4();
-    final title = p
+    final id = intoProjectId ?? const Uuid().v4();
+    final label = p
         .basename(directoryOrZipPath)
         .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), '');
+    final title = target?['title'] as String? ?? label;
+    final snapshotId = const Uuid().v4();
     store.db.execute('BEGIN');
     try {
-      store.db.execute(
-        'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
-        [id, title, '', ''],
-      );
+      if (target == null) {
+        store.db.execute(
+          'INSERT INTO projects(id,title,question,next_step) VALUES(?,?,?,?)',
+          [id, title, '', ''],
+        );
+      }
+      store.db.execute('INSERT INTO snapshots VALUES(?,?,?,?)', [
+        snapshotId,
+        id,
+        DateTime.now().toUtc().toIso8601String(),
+        label,
+      ]);
       // research-skill bookkeeping, keyed by project-relative POSIX path.
       final documents = <String, (String, String)>{};
       final manifests = <String, Map<String, dynamic>>{};
@@ -196,8 +225,15 @@ class ResearchExchange {
           final documentId = const Uuid().v4();
           final hash = sha256.convert(await entity.readAsBytes()).toString();
           store.db.execute(
-            'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256) VALUES(?,?,?,?,?)',
-            [documentId, id, relative, store.storedPath(entity.path), hash],
+            'INSERT INTO documents(id,project_id,relative_path,snapshot_path,sha256,snapshot_id) VALUES(?,?,?,?,?,?)',
+            [
+              documentId,
+              id,
+              relative,
+              store.storedPath(entity.path),
+              hash,
+              snapshotId,
+            ],
           );
           if (projectPath != null) documents[projectPath] = (documentId, hash);
         }
@@ -244,13 +280,10 @@ class ResearchExchange {
                     .toString();
             final entryId = const Uuid().v4();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
-            store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
-              entryId,
-              id,
-              kind,
-              recordTitle,
-              jsonEncode(data),
-            ]);
+            store.db.execute(
+              'INSERT INTO entries(id,project_id,kind,title,data,snapshot_id) VALUES(?,?,?,?,?,?)',
+              [entryId, id, kind, recordTitle, jsonEncode(data), snapshotId],
+            );
             if (isLog && kind != 'other') {
               logs.add(
                 ResearchEntry(
@@ -266,20 +299,31 @@ class ResearchExchange {
           }
         }
       }
-      var layout = 'generic';
-      if (root != null) {
-        layout = v2 ? 'research-skill-v2' : 'research-skill-v1';
-        store.db.execute(
-          'UPDATE projects SET layout=?,skill_root=? WHERE id=?',
-          [layout, root, id],
+      final layout = root == null
+          ? 'generic'
+          : v2
+          ? 'research-skill-v2'
+          : 'research-skill-v1';
+      store.db.execute(
+        'UPDATE projects SET layout=?,skill_root=?,current_snapshot=? WHERE id=?',
+        [layout, root ?? '', snapshotId, id],
+      );
+      if (v2) {
+        computeBindings(
+          entries: logs,
+          documents: documents,
+          manifests: manifests,
+        ).forEach(store.insertBinding);
+      }
+      final previous = target?['current_snapshot'] as String?;
+      if (previous != null) {
+        lastReimport = _carryOver(
+          id,
+          from: previous,
+          fromRoot: target!['skill_root'] as String,
+          to: snapshotId,
+          toRoot: root ?? '',
         );
-        if (v2) {
-          computeBindings(
-            entries: logs,
-            documents: documents,
-            manifests: manifests,
-          ).forEach(store.insertBinding);
-        }
       }
       store.db.execute('COMMIT');
       return ResearchProject(
@@ -293,6 +337,116 @@ class ResearchExchange {
       await snapshot.delete(recursive: true);
       rethrow;
     }
+  }
+
+  /// Moves notes, outline links and manual binding choices from snapshot
+  /// [from] to [to]. Documents match by project-relative path; records by
+  /// (kind, id, rev). Nothing is guessed: misses stay on the old snapshot.
+  ReimportSummary _carryOver(
+    String projectId, {
+    required String from,
+    required String fromRoot,
+    required String to,
+    required String toRoot,
+  }) {
+    final db = store.db;
+    String key(Row r, String root) {
+      final path = p.posix.joinAll(p.split(r['relative_path'] as String));
+      return path.startsWith(root) ? path.substring(root.length) : path;
+    }
+
+    final newDocs = {
+      for (final r in db.select(
+        'SELECT id,relative_path,sha256 FROM documents WHERE snapshot_id=?',
+        [to],
+      ))
+        key(r, toRoot): r,
+    };
+    var moved = 0, review = 0, left = 0, kept = 0;
+    final docMap = <String, String>{};
+    for (final old in db.select(
+      'SELECT id,relative_path,sha256 FROM documents WHERE snapshot_id=?',
+      [from],
+    )) {
+      final next = newDocs[key(old, fromRoot)];
+      if (next != null) docMap[old['id'] as String] = next['id'] as String;
+      final count =
+          db.select('SELECT COUNT(*) AS c FROM notes WHERE document_id=?', [
+                old['id'],
+              ]).first['c']
+              as int;
+      if (count == 0) continue;
+      if (next == null) {
+        left += count;
+        continue;
+      }
+      final changed = next['sha256'] != old['sha256'];
+      db.execute(
+        'UPDATE notes SET document_id=?,needs_review=MAX(needs_review,?) WHERE document_id=?',
+        [next['id'], changed ? 1 : 0, old['id']],
+      );
+      moved += count;
+      if (changed) review += count;
+    }
+    String? identity(Row r) {
+      final data = WorkbenchStore.decode(r['data'] as String);
+      return data['id'] == null || data['rev'] == null
+          ? null
+          : '${r['kind']}/${data['id']}@${data['rev']}';
+    }
+
+    final newEntries = <String, List<String>>{};
+    for (final r in db.select(
+      'SELECT id,kind,data FROM entries WHERE snapshot_id=?',
+      [to],
+    )) {
+      final k = identity(r);
+      if (k != null) newEntries.putIfAbsent(k, () => []).add(r['id'] as String);
+    }
+    final oldEntries = {
+      for (final r in db.select(
+        'SELECT id,kind,data FROM entries WHERE snapshot_id=?',
+        [from],
+      ))
+        r['id'] as String: identity(r),
+    };
+    var outlineMoved = 0, outlineLeft = 0;
+    for (final row in store.outline(projectId)) {
+      final evidence = row['evidence_id'];
+      if (!oldEntries.containsKey(evidence)) continue;
+      final matches = newEntries[oldEntries[evidence]];
+      if (matches?.length == 1) {
+        db.execute('UPDATE outline SET evidence_id=? WHERE id=?', [
+          matches!.single,
+          row['id'],
+        ]);
+        outlineMoved++;
+      } else {
+        outlineLeft++;
+      }
+    }
+    for (final b in db.select(
+      "SELECT b.document_id,b.paper_id FROM paper_bindings b JOIN documents d ON d.id=b.document_id WHERE d.snapshot_id=? AND b.method LIKE '%+manual'",
+      [from],
+    )) {
+      final doc = docMap[b['document_id']];
+      if (doc == null) continue;
+      final candidate = db.select(
+        'SELECT 1 FROM paper_bindings WHERE document_id=? AND paper_id=? AND ambiguous=1',
+        [doc, b['paper_id']],
+      );
+      if (candidate.isEmpty) continue;
+      store.applyBindingChoice(doc, b['paper_id'] as String);
+      kept++;
+    }
+    return ReimportSummary(
+      notesMoved: moved,
+      notesNeedReview: review,
+      notesLeft: left,
+      outlineMoved: outlineMoved,
+      outlineLeft: outlineLeft,
+      bindingsKept: kept,
+    );
   }
 
   // related_work/<slug>/versions/<vN>/manifest.json written by fetch-paper.sh.
@@ -767,15 +921,18 @@ class ResearchExchange {
     String destinationDirectory,
   ) async {
     final project = store.projects().firstWhere((e) => e.id == projectId);
+    // Outline links may still point at earlier snapshots after a re-import.
     final entries = {
-      for (final entry in store.entries(projectId)) entry.id: entry,
+      for (final entry in store.entries(projectId, allSnapshots: true))
+        entry.id: entry,
     };
+    final current = {for (final e in store.entries(projectId)) e.id};
     final accepted = {
       for (final run in store.runs(projectId).where((r) => r.accepted))
         run.id: run,
     };
     final noteEvidence = <String, (ResearchDocument, ReadingNote)>{
-      for (final doc in store.documents(projectId))
+      for (final doc in store.documents(projectId, allSnapshots: true))
         for (final note in store.notes(doc.id)) note.id: (doc, note),
     };
     final out = StringBuffer(
@@ -789,7 +946,7 @@ class ResearchExchange {
         // research-skill refs let check-research.py verify freshness.
         final ref = skillRef(entry);
         out.writeln(
-          '${entry.title}\n\n来源记录：${ref == null ? '' : '$ref '}$evidence\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
+          '${entry.title}\n\n来源记录：${ref == null ? '' : '$ref '}$evidence${current.contains(evidence) ? '' : '（旧快照，最新导入中未找到同一修订）'}\n\n```json\n${const JsonEncoder.withIndent('  ').convert(entry.data)}\n```\n',
         );
       } else if (accepted.containsKey(evidence)) {
         final run = accepted[evidence]!;
@@ -841,10 +998,27 @@ class ClaimDraftExport {
 
   /// (note id, reason) for notes that could not become drafts.
   final List<(String, String)> skipped;
+  int get notesNeedingReview => rows
+      .where((r) => (r['workbench'] as Map)['note_needs_review'] == true)
+      .length;
   int get hashMismatches => rows
       .where((r) => (r['workbench'] as Map)['hash_mismatch'] == true)
       .length;
   Set<String> get missingFields => {
     for (final r in rows) ...missingDraftFields(r),
   };
+}
+
+/// What [ResearchExchange.importResearch] carried into a new snapshot.
+class ReimportSummary {
+  const ReimportSummary({
+    required this.notesMoved,
+    required this.notesNeedReview,
+    required this.notesLeft,
+    required this.outlineMoved,
+    required this.outlineLeft,
+    required this.bindingsKept,
+  });
+  final int notesMoved, notesNeedReview, notesLeft;
+  final int outlineMoved, outlineLeft, bindingsKept;
 }
