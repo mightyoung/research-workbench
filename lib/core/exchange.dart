@@ -231,13 +231,19 @@ class ResearchExchange {
                     .toString();
             // Preserve source IDs verbatim in data; local IDs scope imported snapshots.
             found++;
-            final reuse = oldEntries[_entryKey(kind, data)];
-            if (reuse != null && reuse.isNotEmpty) {
-              store.db.execute('UPDATE entries SET title=?,data=? WHERE id=?', [
-                recordTitle,
-                jsonEncode(data),
-                reuse.removeAt(0),
-              ]);
+            // Older imports stored kinds now recognised as `other`; reuse
+            // those rows so their local IDs and links survive.
+            final reuse = [_entryKey(kind, data), _entryKey('other', data)]
+                .map((k) => oldEntries[k])
+                .firstWhere(
+                  (ids) => ids != null && ids.isNotEmpty,
+                  orElse: () => null,
+                );
+            if (reuse != null) {
+              store.db.execute(
+                'UPDATE entries SET kind=?,title=?,data=? WHERE id=?',
+                [kind, recordTitle, jsonEncode(data), reuse.removeAt(0)],
+              );
             } else {
               store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?)', [
                 const Uuid().v4(),

@@ -431,6 +431,23 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     },
   );
 
+  test('re-import reclassifies legacy other rows in place', () async {
+    final source = Directory(p.join(temp.path, 'legacy'))..createSync();
+    final tension = {'id': 't1', 'rev': 1, 'observation': 'state leak'};
+    File(
+      p.join(source.path, 'tensions.jsonl'),
+    ).writeAsStringSync('${jsonEncode(tension)}\n');
+    final project = await exchange.importResearch(source.path);
+    final entry = store.entries(project.id).single;
+    // Simulate an import made before tensions were a recognised kind.
+    store.db.execute("UPDATE entries SET kind='other' WHERE id=?", [entry.id]);
+    store.addOutline(project.id, 'Cited', entry.id);
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    final after = store.entries(project.id).single;
+    expect(after.id, entry.id);
+    expect(after.kind, 'tensions');
+  });
+
   test('existing v3 reading notes gain empty page and quote fields', () {
     final root = p.join(temp.path, 'v3-notes');
     Directory(root).createSync();
