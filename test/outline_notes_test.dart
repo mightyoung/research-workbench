@@ -49,7 +49,20 @@ void main() {
       throwsStateError,
     );
 
-    File(p.join(temp.path, 'src', 'claims.jsonl')).writeAsStringSync('');
+    final claims = File(p.join(temp.path, 'src', 'claims.jsonl'));
+    claims.writeAsStringSync(
+      '${jsonEncode({'id': 'c1', 'rev': 1, 'statement': 'rewritten'})}\n',
+    );
+    await expectLater(
+      exchange.importResearch(
+        p.join(temp.path, 'src'),
+        intoProjectId: projectId,
+      ),
+      throwsFormatException,
+      reason: 'a note-cited revision cannot change silently',
+    );
+
+    claims.writeAsStringSync('');
     await exchange.importResearch(
       p.join(temp.path, 'src'),
       intoProjectId: projectId,

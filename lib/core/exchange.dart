@@ -126,8 +126,11 @@ class ResearchExchange {
     }
   }
 
-  /// Finds whether a local record is cited as evidence (`?1` = local ID).
-  static const _citedSql = 'SELECT 1 FROM outline WHERE evidence_id=?1';
+  /// Finds whether a local record is cited by the outline or a reading note
+  /// (`?1` = local ID).
+  static const _citedSql =
+      'SELECT 1 FROM outline WHERE evidence_id=?1 '
+      'UNION ALL SELECT 1 FROM notes WHERE entry_id=?1';
 
   /// Key-order-independent JSON, for comparing record content.
   static String _canonical(Object? value) => jsonEncode(switch (value) {
