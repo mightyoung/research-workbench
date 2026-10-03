@@ -402,6 +402,27 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
     db.execute('UPDATE runs SET data=? WHERE id=?', [jsonEncode(data), runId]);
   }
 
+  /// Preserve the first export receipt without changing the acceptance column.
+  void recordResultExport(String runId, String digest) {
+    final rows = db.select('SELECT * FROM runs WHERE id=?', [runId]);
+    if (rows.isEmpty) throw StateError('Unknown run');
+    final data = decode(rows.single['data'] as String);
+    if (data['_localManual'] != true || data.containsKey('_snapshotPath')) {
+      throw StateError('Only local manual runs can be exported');
+    }
+    final previous = data['_exportedDigest'];
+    if (previous != null && previous != digest) {
+      throw StateError('Result changed after export; create a new run/attempt');
+    }
+    if (previous == null) {
+      data['_exportedDigest'] = digest;
+      db.execute('UPDATE runs SET data=? WHERE id=?', [
+        jsonEncode(data),
+        runId,
+      ]);
+    }
+  }
+
   /// Starts a record for work the user chooses to perform in another tool.
   /// Task commands are data and are never launched by this method.
   ResearchRun startManualRun(ResearchTask task) {

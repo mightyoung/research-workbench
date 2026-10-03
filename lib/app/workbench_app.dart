@@ -1332,7 +1332,9 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
                       child: const Text('附加产物并导出'),
                     ),
                   ],
-                  if (!run.accepted && run.data['_localManual'] != true)
+                  if (!run.accepted &&
+                      (run.data['_localManual'] != true ||
+                          run.status != 'running'))
                     FilledButton(
                       onPressed: () async {
                         if (await confirm(
