@@ -18,7 +18,9 @@ class LanTransferPage extends StatefulWidget {
   });
   final String rootPath;
   final String? suggestedFile;
-  final Future<void> Function(String path, String kind) onImport;
+
+  /// Returns false when the user cancelled, so the received file stays here.
+  final Future<bool> Function(String path, String kind) onImport;
 
   @override
   State<LanTransferPage> createState() => _LanTransferPageState();
@@ -152,8 +154,7 @@ class _LanTransferPageState extends State<LanTransferPage> {
     if (file == null) return;
     setState(() => _busy = true);
     try {
-      await widget.onImport(file, kind);
-      if (mounted) Navigator.pop(context);
+      if (await widget.onImport(file, kind) && mounted) Navigator.pop(context);
     } catch (e) {
       _message('导入未完成：$e');
     } finally {

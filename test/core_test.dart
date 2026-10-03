@@ -380,6 +380,7 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
     're-import keeps outline-referenced records that left the source',
     () async {
       final source = Directory(p.join(temp.path, 'shrinking'))..createSync();
+      File(p.join(source.path, 'README.md')).writeAsStringSync('# Kept');
       final claims = File(p.join(source.path, 'claims.jsonl'))
         ..writeAsStringSync('${jsonEncode({'title': 'no id'})}\n');
       final project = await exchange.importResearch(source.path);
@@ -394,6 +395,58 @@ INSERT INTO tasks VALUES('t1',1,'p1','T','G','{}');''',
       );
     },
   );
+
+  test(
+    'refresh from empty or non-research material leaves project intact',
+    () async {
+      final source = Directory(p.join(temp.path, 'real'))..createSync();
+      File(p.join(source.path, 'README.md')).writeAsStringSync('# Real');
+      File(
+        p.join(source.path, 'claims.jsonl'),
+      ).writeAsStringSync('${jsonEncode({'id': 'c1', 'rev': 1})}\n');
+      final project = await exchange.importResearch(source.path);
+
+      final empty = Directory(p.join(temp.path, 'empty'))..createSync();
+      await expectLater(
+        exchange.importResearch(empty.path, intoProjectId: project.id),
+        throwsFormatException,
+      );
+      final task = store.saveTask(
+        projectId: project.id,
+        title: 't',
+        goal: 'g',
+        spec: {},
+      );
+      final taskZip = await exchange.exportTask(task, temp.path);
+      await expectLater(
+        exchange.importResearch(taskZip, intoProjectId: project.id),
+        throwsFormatException,
+      );
+      expect(store.entries(project.id), hasLength(1));
+      expect(store.documents(project.id).single.relativePath, 'README.md');
+      expect(
+        Directory(p.join(store.rootPath, 'snapshots', 'research')).listSync(),
+        hasLength(1),
+      );
+    },
+  );
+
+  test('re-import reclassifies legacy other rows in place', () async {
+    final source = Directory(p.join(temp.path, 'legacy'))..createSync();
+    final tension = {'id': 't1', 'rev': 1, 'observation': 'state leak'};
+    File(
+      p.join(source.path, 'tensions.jsonl'),
+    ).writeAsStringSync('${jsonEncode(tension)}\n');
+    final project = await exchange.importResearch(source.path);
+    final entry = store.entries(project.id).single;
+    // Simulate an import made before tensions were a recognised kind.
+    store.db.execute("UPDATE entries SET kind='other' WHERE id=?", [entry.id]);
+    store.addOutline(project.id, 'Cited', entry.id);
+    await exchange.importResearch(source.path, intoProjectId: project.id);
+    final after = store.entries(project.id).single;
+    expect(after.id, entry.id);
+    expect(after.kind, 'tensions');
+  });
 
   test('existing v3 reading notes gain empty page and quote fields', () {
     final root = p.join(temp.path, 'v3-notes');

@@ -14,7 +14,7 @@ void main() {
       MaterialApp(
         home: LanTransferPage(
           rootPath: temp.path,
-          onImport: (path, kind) async {},
+          onImport: (path, kind) async => true,
         ),
       ),
     );
