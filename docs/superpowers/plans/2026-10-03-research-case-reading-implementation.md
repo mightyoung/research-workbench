@@ -50,6 +50,8 @@
 
 ## 阶段 A：先修回导，再建立记录和交换
 
+> **2026-10-04：** 任务 1 已由 #15 合入 `main`（`28af290`）。任务 2–4 改按 [2026-10-04 实施计划](2026-10-04-case-records-and-views.md) 执行。下文任务 2 写的「追加 v6」已经过时：当前 `WorkbenchStore._migrations` 长度是 6，v6 是提纲分区。
+
 ### Task 1: 结果包同 ID 语义幂等
 
 **Files:** Create `lib/core/result_payload.dart`; modify `lib/core/exchange.dart:599-744`, `lib/core/store.dart:340-407`, `lib/app/workbench_app.dart:1190-1220`; test `test/core_test.dart`, `test/run_comparison_test.dart`.
