@@ -305,6 +305,35 @@ void main() {
     },
   );
 
+  test(
+    'a changed ZIP refresh does not add a document on every later refresh',
+    () async {
+      final project = await exchange.importResearch(write(skillProject()).path);
+      final pdf = store.documents(project.id).firstWhere((d) => d.isPdf);
+      store.saveNote(pdf.id, 'p. 1', 'on the directory bytes');
+      final changed = skillProject()
+        ..['related_work/p1/versions/v1/paper.pdf'] = '$skillPdf changed';
+      final archive = Archive();
+      changed.forEach((rel, text) {
+        final bytes = utf8.encode(text);
+        archive.addFile(ArchiveFile('proj/$rel', bytes.length, bytes));
+      });
+      final zip = File(p.join(temp.path, 'changed.zip'))
+        ..writeAsBytesSync(ZipEncoder().encode(archive));
+      Future<List<ResearchDocument>> pdfs() async {
+        await exchange.importResearch(zip.path, intoProjectId: project.id);
+        return store.documents(project.id).where((d) => d.isPdf).toList();
+      }
+
+      final first = await pdfs();
+      expect(first, hasLength(2));
+      expect(first.map((d) => d.id), contains(pdf.id));
+      expect(store.notes(pdf.id).single.text, 'on the directory bytes');
+      expect(await pdfs(), hasLength(2));
+      expect(await pdfs(), hasLength(2));
+    },
+  );
+
   test('a changed file kept for its notes keeps its binding', () async {
     final project = await exchange.importResearch(write(skillProject()).path);
     final md = store

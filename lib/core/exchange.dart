@@ -253,12 +253,30 @@ class ResearchExchange {
       oldEntries.putIfAbsent(_entryKey(e.kind, e.data), () => []).add(e.id);
       oldData[e.id] = e.data;
     }
-    // Newest version per project-relative path (a ZIP's top-level folder is
-    // not part of it); older versions kept for their notes stay put.
-    final oldDocs = {
-      for (final d in store.documents(id))
-        _docKey(d.relativePath, existing?.skillRoot ?? ''): d,
-    };
+    // A noted copy can stay at `related_work/...` while the current file is
+    // stored as `proj/related_work/...`. Both normalize to one key, so a map
+    // overwrite would hide the current row and every later refresh would
+    // insert another copy. Noted copies are kept aside.
+    final skillRoot = existing?.skillRoot ?? '';
+    final rank = <String, int>{};
+    final ranked = store.db.select(
+      'SELECT id FROM documents WHERE project_id=? ORDER BY rowid',
+      [id],
+    );
+    for (var i = 0; i < ranked.length; i++) {
+      rank[ranked[i].columnAt(0) as String] = i;
+    }
+    final grouped = <String, List<ResearchDocument>>{};
+    for (final d in store.documents(id)) {
+      grouped.putIfAbsent(_docKey(d.relativePath, skillRoot), () => []).add(d);
+    }
+    final oldDocs = <String, ResearchDocument>{};
+    final keptAside = <ResearchDocument>[];
+    for (final entry in grouped.entries) {
+      final chosen = _currentDocument(entry.value, skillRoot, rank);
+      oldDocs[entry.key] = chosen;
+      keptAside.addAll(entry.value.where((d) => d.id != chosen.id));
+    }
     // Manual binding choices survive a refresh when the same ambiguity recurs.
     final manual = <String, List<String>>{};
     for (final b in store.bindings(id)) {
@@ -454,7 +472,7 @@ class ResearchExchange {
           }
         }
       }
-      for (final doc in oldDocs.values) {
+      for (final doc in [...oldDocs.values, ...keptAside]) {
         const unnoted = 'NOT IN (SELECT document_id FROM notes)';
         store.db.execute(
           'DELETE FROM paper_bindings WHERE document_id=? AND document_id $unnoted',
@@ -508,7 +526,28 @@ class ResearchExchange {
   /// Document identity across refreshes: POSIX path below the skill root.
   static String _docKey(String relativePath, String root) {
     final path = p.posix.joinAll(p.split(relativePath));
+    if (root.isEmpty) return path;
     return path.startsWith(root) ? path.substring(root.length) : path;
+  }
+
+  /// The row a refresh should update when several documents share [_docKey].
+  /// Prefer the newest row already stored under the current skill root.
+  static ResearchDocument _currentDocument(
+    List<ResearchDocument> docs,
+    String root,
+    Map<String, int> rank,
+  ) {
+    var pool = docs;
+    if (root.isNotEmpty) {
+      final prefixed = [
+        for (final d in docs)
+          if (p.posix.joinAll(p.split(d.relativePath)).startsWith(root)) d,
+      ];
+      if (prefixed.isNotEmpty) pool = prefixed;
+    }
+    return pool.reduce(
+      (a, b) => (rank[a.id] ?? -1) >= (rank[b.id] ?? -1) ? a : b,
+    );
   }
 
   // related_work/<slug>/versions/<vN>/manifest.json written by fetch-paper.sh.
