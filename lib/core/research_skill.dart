@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:path/path.dart' as p;
 
+import 'case_models.dart';
 import 'models.dart';
 
 /// research-skill v6.5 project layout support. research-skill is the format
@@ -358,6 +359,95 @@ List<String> missingDraftFields(Map<String, dynamic> row) => [
 
 /// Matches pubspec.yaml; recorded in drafts for provenance only.
 const appVersion = '0.1.0+1';
+
+/// Read-only method-version hint. It is not the row's review status.
+class SkillReviewHint {
+  const SkillReviewHint({
+    required this.methodCommit,
+    required this.severity,
+    required this.reason,
+    required this.needsReview,
+  });
+
+  /// `info` for a discovery-yield note, `review` for a method gap, `none` otherwise.
+  final String methodCommit, severity, reason;
+  final bool needsReview;
+}
+
+const _actionableDecisions = {'continue', 'revise', 'ready'};
+
+/// Projects V6.6 search and opportunity rules onto [group].
+/// Does not write [ResearchEntry.data] or infer a skill revision.
+SkillReviewHint reviewHint(RevisionGroup group, String methodCommit) {
+  final current = group.current;
+  if (methodCommit != defaultMethodCommit) {
+    return SkillReviewHint(
+      methodCommit: methodCommit,
+      severity: 'none',
+      reason: '',
+      needsReview: false,
+    );
+  }
+  if (current.kind == 'searches') {
+    final data = current.data;
+    final parts = <String>[
+      if (data['subq'] is String && (data['subq'] as String).isNotEmpty)
+        data['subq'] as String,
+      if (data['intent'] is String && (data['intent'] as String).isNotEmpty)
+        data['intent'] as String,
+      'discovery-yield 仅为提示',
+    ];
+    return SkillReviewHint(
+      methodCommit: methodCommit,
+      severity: 'info',
+      reason: parts.join('；'),
+      needsReview: false,
+    );
+  }
+  if (current.kind == 'opportunities' &&
+      _actionableDecisions.contains(current.data['decision']) &&
+      decisiveNeighborRefs(current).isEmpty) {
+    return const SkillReviewHint(
+      methodCommit: defaultMethodCommit,
+      severity: 'review',
+      reason: '按当前方法待复核',
+      needsReview: true,
+    );
+  }
+  return SkillReviewHint(
+    methodCommit: methodCommit,
+    severity: 'none',
+    reason: '',
+    needsReview: false,
+  );
+}
+
+/// Paper links declared by an opportunity. Invalid items are skipped.
+List<SourceRef> decisiveNeighborRefs(ResearchEntry opportunity) {
+  final raw = opportunity.data['decisive_neighbors'];
+  if (raw is! List) return const [];
+  final refs = <SourceRef>[];
+  for (final item in raw) {
+    if (item is! Map) continue;
+    final id = item['id'];
+    if (id is! String || id.isEmpty) continue;
+    final rev = item['rev'];
+    final parsed = rev is int
+        ? rev
+        : (rev is String ? int.tryParse(rev) : null);
+    if (parsed == null) continue;
+    final snapshot = item['snapshotId'];
+    refs.add(
+      SourceRef(
+        snapshotId: snapshot is String ? snapshot : '',
+        kind: 'papers',
+        sourceId: id,
+        rev: parsed,
+      ),
+    );
+  }
+  return refs;
+}
 
 String stripBom(String text) =>
     text.startsWith('\uFEFF') ? text.substring(1) : text;

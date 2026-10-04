@@ -33,6 +33,7 @@ String bindingMethodLabel(String method) {
 }
 
 /// Status badges for a revision group, in display order.
+/// Row review status only. Method-version hints stay in [methodHintLabels].
 List<String> revisionBadges(RevisionGroup g) => [
   if (revOf(g.current) != null) 'r${revOf(g.current)}',
   if (g.older.isNotEmpty) '${g.history.length} 个修订',
@@ -40,6 +41,10 @@ List<String> revisionBadges(RevisionGroup g) => [
   if (g.duplicate) '修订重复',
   if (g.retired) '已退役',
 ];
+
+/// Separate copy for a method-version hint, so it is not the row's 待复核 badge.
+List<String> methodHintLabels(SkillReviewHint hint) =>
+    hint.severity == 'none' || hint.reason.isEmpty ? const [] : [hint.reason];
 
 /// The exact paper revision a binding points at, if imported.
 ResearchEntry? boundPaper(

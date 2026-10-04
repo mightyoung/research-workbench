@@ -53,15 +53,23 @@ INSERT INTO sections(id,project_id,heading,position)
   FROM outline GROUP BY project_id,heading;
 UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=outline.project_id AND s.heading=outline.heading);
 '''),
+    // v7: research cases, append-only plans, attempts and events.
+    _caseTables,
   ];
   static int get schemaVersion => _migrations.length;
 
+  /// Index of [_caseTables]. Existing databases are copied beside the sqlite
+  /// file before this step; a failed copy leaves the original unmigrated.
+  static const _caseTableMigration = 6;
+
   static WorkbenchStore open(String rootPath) {
     Directory(rootPath).createSync(recursive: true);
-    final db = sqlite3.open(p.join(rootPath, 'workbench.sqlite'));
+    final dbPath = p.join(rootPath, 'workbench.sqlite');
+    final existed = File(dbPath).existsSync();
+    final db = sqlite3.open(dbPath);
     try {
       db.execute('PRAGMA foreign_keys=ON');
-      _migrate(db);
+      _migrate(db, existed ? dbPath : null);
     } catch (_) {
       db.close();
       rethrow;
@@ -69,7 +77,7 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
     return WorkbenchStore._(p.absolute(rootPath), db);
   }
 
-  static void _migrate(Database db) {
+  static void _migrate(Database db, String? existingDbPath) {
     final version = db.select('PRAGMA user_version').first.columnAt(0) as int;
     if (version > schemaVersion) {
       throw StateError(
@@ -77,6 +85,9 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
       );
     }
     for (var v = version; v < schemaVersion; v++) {
+      if (v == _caseTableMigration && existingDbPath != null) {
+        _backupBeforeCaseTables(db, existingDbPath);
+      }
       db.execute('BEGIN');
       try {
         _migrations[v](db);
@@ -87,6 +98,93 @@ UPDATE outline SET section_id=(SELECT s.id FROM sections s WHERE s.project_id=ou
         rethrow;
       }
     }
+  }
+
+  /// Copies [dbPath] to `workbench.sqlite.bak-v6` and reopens the copy.
+  /// The copy must still be user_version 6. A directory at that path, a
+  /// failed copy, or the wrong version aborts the migration.
+  static void _backupBeforeCaseTables(Database db, String dbPath) {
+    final backupPath = '$dbPath.bak-v6';
+    if (FileSystemEntity.isDirectorySync(backupPath)) {
+      throw StateError(
+        'Refusing case-table migration; backup path is a directory: $backupPath',
+      );
+    }
+    final journal = db.select('PRAGMA journal_mode').first.columnAt(0);
+    if (journal == 'wal') db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
+    try {
+      File(dbPath).copySync(backupPath);
+      _requireBackupVersion(backupPath);
+      return;
+    } catch (error) {
+      if (FileSystemEntity.isDirectorySync(backupPath)) {
+        throw StateError(
+          'Refusing case-table migration; backup failed: $error',
+        );
+      }
+      final partial = File(backupPath);
+      if (partial.existsSync()) partial.deleteSync();
+      try {
+        final sqlPath = backupPath.replaceAll('\\', '/').replaceAll("'", "''");
+        db.execute("VACUUM INTO '$sqlPath'");
+        _requireBackupVersion(backupPath);
+      } catch (fallback) {
+        throw StateError(
+          'Refusing case-table migration; backup failed: $fallback',
+        );
+      }
+    }
+  }
+
+  static void _requireBackupVersion(String backupPath) {
+    final copy = sqlite3.open(backupPath, mode: OpenMode.readOnly);
+    try {
+      final version =
+          copy.select('PRAGMA user_version').first.columnAt(0) as int;
+      if (version != 6) {
+        throw StateError('Backup user_version is $version, expected 6');
+      }
+    } finally {
+      copy.close();
+    }
+  }
+
+  static void _caseTables(Database db) {
+    db.execute('''
+CREATE TABLE research_cases(
+  id TEXT PRIMARY KEY,
+  project_id TEXT REFERENCES projects(id),
+  question TEXT NOT NULL,
+  method_commit TEXT NOT NULL,
+  workflow_id TEXT,
+  candidates TEXT NOT NULL,
+  process_state TEXT NOT NULL,
+  scientific_judgement TEXT NOT NULL);
+CREATE TABLE plan_versions(
+  plan_id TEXT,
+  version INTEGER,
+  case_id TEXT REFERENCES research_cases(id),
+  parent_version INTEGER,
+  reason TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  PRIMARY KEY(plan_id, version));
+CREATE TABLE execution_attempts(
+  id TEXT PRIMARY KEY,
+  case_id TEXT REFERENCES research_cases(id),
+  plan_id TEXT NOT NULL,
+  plan_version INTEGER NOT NULL,
+  task_id TEXT,
+  task_revision INTEGER,
+  executor_id TEXT NOT NULL,
+  process_status TEXT NOT NULL);
+CREATE TABLE case_events(
+  id TEXT PRIMARY KEY,
+  case_id TEXT REFERENCES research_cases(id),
+  type TEXT NOT NULL,
+  source_refs TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  position INTEGER NOT NULL);
+''');
   }
 
   /// v2: snapshot paths become relative to [rootPath] so the data directory

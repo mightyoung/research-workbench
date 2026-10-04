@@ -4,10 +4,12 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:research_workbench/core/case_models.dart';
 import 'package:research_workbench/core/exchange.dart';
 import 'package:research_workbench/core/models.dart';
 import 'package:research_workbench/core/research_skill.dart';
 import 'package:research_workbench/core/store.dart';
+import 'package:research_workbench/app/skill_panels.dart';
 
 import 'skill_fixture.dart';
 
@@ -300,4 +302,177 @@ void main() {
       ('y', false, 'arxiv_manifest+manual'),
     );
   });
+
+  test('v66 hints preserve fields and do not write the skill root', () async {
+    final files = skillProject();
+    files['research/claims.jsonl'] = files['research/claims.jsonl']!
+        .replaceFirst(
+          '"statement":"修订后"',
+          '"statement":"修订后","lab_marker":"keep-me"',
+        );
+    files['research/opportunities.jsonl'] = _rows([
+      {
+        'id': 'o1',
+        'rev': 1,
+        'title': '候选',
+        'status': 'active',
+        'decision': 'continue',
+      },
+    ]);
+    files['research/searches.jsonl'] = _rows([
+      {
+        'id': 'q1',
+        'rev': 1,
+        'query': 'attention',
+        'subq': 'sparse attention',
+        'intent': 'exploratory',
+        'status': 'done',
+      },
+    ]);
+    final root = write(files, 'hints');
+    final before = _tree(root);
+    final project = await exchange.importResearch(root.path);
+
+    final claim = store.entries(project.id, kind: 'claims').last;
+    expect(claim.data['lab_marker'], 'keep-me');
+    final search = store.entries(project.id, kind: 'searches').single;
+    final searchBefore = jsonEncode(search.data);
+    final searchHint = reviewHint(RevisionGroup([search]), defaultMethodCommit);
+    expect(searchHint.methodCommit, defaultMethodCommit);
+    expect(searchHint.severity, 'info');
+    expect(searchHint.needsReview, isFalse);
+    expect(searchHint.reason, contains('sparse attention'));
+    expect(searchHint.reason, contains('exploratory'));
+    expect(searchHint.reason, contains('discovery-yield 仅为提示'));
+    expect(jsonEncode(search.data), searchBefore);
+    expect(search.data['status'], 'done');
+
+    final bare = ResearchEntry(
+      id: 'bare',
+      projectId: project.id,
+      kind: 'searches',
+      title: 'bare',
+      data: {'id': 'q2', 'rev': 1, 'query': 'only a query'},
+    );
+    final bareHint = reviewHint(RevisionGroup([bare]), defaultMethodCommit);
+    expect(bareHint.needsReview, isFalse);
+    expect(bareHint.reason, contains('discovery-yield 仅为提示'));
+    expect(bareHint.reason, isNot(contains('sparse attention')));
+    expect(bareHint.reason, isNot(contains('exploratory')));
+    expect(bare.data.containsKey('subq'), isFalse);
+    expect(bare.data.containsKey('intent'), isFalse);
+
+    final linked = ResearchEntry(
+      id: 'linked',
+      projectId: project.id,
+      kind: 'opportunities',
+      title: 'linked',
+      data: {
+        'id': 'o-link',
+        'rev': 1,
+        'decision': 'revise',
+        'decisive_neighbors': [
+          {'id': 'p1', 'rev': 2, 'snapshotId': 'snap-a'},
+          'nope',
+          {'id': '', 'rev': 1},
+          {'id': 'p2'},
+          {'id': 'p3', 'rev': 'x'},
+          {'id': 'p4', 'rev': '5'},
+        ],
+      },
+    );
+    final refs = decisiveNeighborRefs(linked);
+    expect(
+      [
+        for (final ref in refs)
+          '${ref.kind}/${ref.sourceId}@${ref.rev}/${ref.snapshotId}',
+      ],
+      ['papers/p1@2/snap-a', 'papers/p4@5/'],
+    );
+    final linkedBefore = jsonEncode(linked.data);
+    final linkedHint = reviewHint(RevisionGroup([linked]), defaultMethodCommit);
+    expect(linkedHint.needsReview, isFalse);
+    expect(linked.data['decision'], 'revise');
+    expect(jsonEncode(linked.data), linkedBefore);
+
+    final open = store.entries(project.id, kind: 'opportunities').single;
+    final openBefore = jsonEncode(open.data);
+    final group = RevisionGroup([open]);
+    final hint = reviewHint(group, defaultMethodCommit);
+    expect(open.data['decision'], 'continue');
+    expect(jsonEncode(open.data), openBefore);
+    expect(hint.needsReview, isTrue);
+    expect(hint.severity, 'review');
+    expect(hint.reason, '按当前方法待复核');
+    expect(group.needsReview, isFalse);
+    expect(revisionBadges(group), isNot(contains('按当前方法待复核')));
+    expect(revisionBadges(group), isNot(contains('待复核')));
+    expect(methodHintLabels(hint), ['按当前方法待复核']);
+
+    for (final decision in ['revise', 'ready']) {
+      final row = ResearchEntry(
+        id: 'd',
+        projectId: project.id,
+        kind: 'opportunities',
+        title: decision,
+        data: {'id': 'o-$decision', 'rev': 1, 'decision': decision},
+      );
+      final flagged = reviewHint(RevisionGroup([row]), defaultMethodCommit);
+      expect(flagged.reason, '按当前方法待复核');
+      expect(row.data['decision'], decision);
+    }
+    final parked = ResearchEntry(
+      id: 'parked',
+      projectId: project.id,
+      kind: 'opportunities',
+      title: 'parked',
+      data: {'id': 'o-park', 'rev': 1, 'decision': 'park'},
+    );
+    expect(
+      reviewHint(RevisionGroup([parked]), defaultMethodCommit).needsReview,
+      isFalse,
+    );
+
+    final historical = reviewHint(group, v64MethodCommit);
+    expect(historical.needsReview, isFalse);
+    expect(historical.severity, 'none');
+    expect(historical.reason, isNot('按当前方法待复核'));
+    expect(open.data['decision'], 'continue');
+
+    final docs = store.documents(project.id);
+    final md = docs.firstWhere((d) => d.relativePath.endsWith('notes.md'));
+    store.saveNote(md.id, '', '分开评估', quote: '召回与排序分开评估。');
+    final out = Directory(p.join(temp.path, 'drafts'));
+    final exported = await exchange.exportClaimDrafts(project.id, [
+      store.notes(md.id).single.id,
+    ], out.path);
+    final draft =
+        jsonDecode(File(exported.path).readAsLinesSync().single)
+            as Map<String, dynamic>;
+    expect(draft['review_status'], 'needs_review');
+    expect(
+      store.entries(project.id, kind: 'claims').last.data['lab_marker'],
+      'keep-me',
+    );
+    expect(
+      File(p.join(root.path, 'research/claims.jsonl')).readAsStringSync(),
+      contains('keep-me'),
+    );
+    expect(_tree(root), before);
+  });
+}
+
+String _rows(List<Map<String, dynamic>> rows) => rows
+    .map(
+      (r) =>
+          '${jsonEncode({'schema_version': 2, 'updated_at': '2026-10-01T12:00:00Z', ...r})}\n',
+    )
+    .join();
+
+List<String> _tree(Directory root) {
+  final names = [
+    for (final entity in root.listSync(recursive: true))
+      if (entity is File) p.relative(entity.path, from: root.path),
+  ]..sort();
+  return names;
 }

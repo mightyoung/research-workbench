@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path/path.dart' as p;
+import '../core/case_models.dart';
+import '../core/case_store.dart';
 import '../core/models.dart';
 import '../core/store.dart';
 import '../core/exchange.dart';
@@ -14,6 +16,7 @@ import '../reader/reader_page.dart';
 import '../relations/relations_page.dart';
 import '../core/skill_bridge.dart';
 import 'lan_transfer_page.dart';
+import 'case_views.dart';
 import 'skill_panels.dart';
 import 'outline_link_dialog.dart';
 import 'run_assessment_dialog.dart';
@@ -87,6 +90,20 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     Icons.device_hub_outlined,
   ];
   WorkbenchStore get store => widget.store;
+
+  /// First saved case wins; a project with no case uses the V6.6 method.
+  String get methodCommit {
+    final id = project?.id;
+    if (id == null) return defaultMethodCommit;
+    final cases = store.casesFor(id);
+    return cases.isEmpty ? defaultMethodCommit : cases.first.methodCommit;
+  }
+
+  List<String> skillLabels(RevisionGroup group) => [
+    ...revisionBadges(group),
+    ...methodHintLabels(reviewHint(group, methodCommit)),
+  ];
+
   ResearchProject? get project {
     final all = store.projects();
     if (all.isEmpty) return null;
@@ -286,6 +303,22 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
     }
     message('局域网文件已导入本机资料库。');
     return true;
+  }
+
+  Future<void> openCaseRecords() async {
+    final current = project;
+    if (current == null) return;
+    final cases = store.casesFor(current.id);
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CaseViews(
+          store: store,
+          projectId: current.id,
+          caseId: cases.isEmpty ? null : cases.first.id,
+        ),
+      ),
+    );
+    if (mounted) refresh();
   }
 
   Future<void> openLan() async {
@@ -569,7 +602,13 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
             ),
           ],
         ),
-        trailing: TextButton(onPressed: editProject, child: const Text('编辑目标')),
+        trailing: Wrap(
+          spacing: 4,
+          children: [
+            TextButton(onPressed: openCaseRecords, child: const Text('研究记录')),
+            TextButton(onPressed: editProject, child: const Text('编辑目标')),
+          ],
+        ),
       ),
       card(
         '下一步',
@@ -829,7 +868,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               title: Text(g.current.title),
               subtitle: Text(
                 [
-                  if (p.isSkill) ...revisionBadges(g),
+                  if (p.isSkill) ...skillLabels(g),
                   entrySubtitle(g.current),
                 ].where((s) => s.isNotEmpty).join(' · '),
                 maxLines: 3,
@@ -900,7 +939,7 @@ class _WorkbenchHomeState extends State<WorkbenchHome> {
               children: [
                 Text(
                   [
-                    if (group != null) ...revisionBadges(group),
+                    if (group != null) ...skillLabels(group),
                     entrySubtitle(e),
                   ].where((s) => s.isNotEmpty).join(' · '),
                 ),

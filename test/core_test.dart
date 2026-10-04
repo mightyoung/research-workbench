@@ -1057,6 +1057,6 @@ PRAGMA user_version=3;
     expect(note.text, 'Legacy note');
     expect(note.pageNumber, isNull);
     expect(note.quote, isEmpty);
-    expect(WorkbenchStore.schemaVersion, 6);
+    expect(WorkbenchStore.schemaVersion, 7);
   });
 }
